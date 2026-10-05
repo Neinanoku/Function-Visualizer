@@ -70,22 +70,29 @@ ERR_COLOR = "#d9363e"
 
 FUNC_COLORS = fv.CURVE_COLORS  # берём из движка
 
-# Пресеты шрифта графика: подпись в меню → ключ fv.FONT_PRESETS
-FONT_CHOICES = [
-    ("Times New Roman (STIX)", "times"),
-    ("LaTeX (Computer Modern)", "latex"),
-    ("Century Schoolbook", "century"),
-    ("DejaVu Serif", "serif"),
-    ("Sans (Calibri)", "sans"),
-]
-
 LEFT_PANEL_WIDTH = 500
 REDRAW_DELAY_MS  = 250        # после правок в панели
 ZOOM_DELAY_MS    = 120        # после колеса мыши (предпросмотр уже показан)
 SYMBOLIC_TIMEOUT_S = 20.0     # сторож: пачка символьных заданий дольше этого — считается зависшей
 MAX_GRID_LINES   = 2000       # span / step не больше этого (иначе сетка «съедает» рисунок)
 
-UI_FONT = "Segoe UI"
+# Шрифт интерфейса (панель, клавиатура, подсказки): Century Schoolbook;
+# если его нет на машине — ближайшие замены. Имя уточняется при старте
+# (_resolve_ui_font), когда Tk уже может перечислить установленные семейства.
+UI_FONT = "Century Schoolbook"
+UI_FONT_FALLBACKS = ["Century Schoolbook", "Century", "TeX Gyre Schola",
+                     "Times New Roman", "Cambria", "Liberation Serif", "DejaVu Serif"]
+
+
+def _resolve_ui_font(root):
+    global UI_FONT
+    try:
+        import tkinter.font as tkfont
+        fams = set(tkfont.families(root))
+        UI_FONT = next((f for f in UI_FONT_FALLBACKS if f in fams), UI_FONT_FALLBACKS[-1])
+    except Exception:
+        pass
+    return UI_FONT
 
 
 def _resource_path(name):
@@ -230,30 +237,34 @@ class Keypad(tk.Frame):
 
     # (подпись, токен, подсказка)
     LEFT_BASIC = [
-        [("x", "x", "переменная x"), ("y", "y", "переменная y (для уравнений, напр. x²+y²=9)"),
-         ("a²", "sq", "квадрат"), ("aᵇ", "^", "степень")],
-        [("(", "(", "открыть скобку"), (")", ")", "выйти из скобки"),
-         ("√", "sqrt", "квадратный корень"), ("ⁿ√", "root", "корень n-й степени")],
-        [("|a|", "abs", "модуль"), ("π", "pi", "число π"),
-         ("e", "e", "число e"), ("a/b", "/", "дробь")],
-        [("sin", "sin", None), ("cos", "cos", None), ("tan", "tan", None), ("cot", "cot", None)],
-        [("ln", "ln", "натуральный логарифм"), ("log", "log", "десятичный логарифм"),
-         ("logₐ", "logb", "логарифм по основанию a"), ("eˣ", "exp", "экспонента")],
-        [("fn ▸", "__page__", "arcsin, arccos, sinh…"), ("↑", "up", "курсор вверх (числитель)"),
-         ("↓", "down", "курсор вниз (знаменатель)"), ("", None, None)],
+        [("x", "x", "variable x"), ("y", "y", "variable y (for equations, e.g. x²+y²=9)"),
+         ("a²", "sq", "square"), ("aᵇ", "^", "power")],
+        [("(", "(", "open parenthesis"), (")", ")", "leave the parentheses"),
+         ("√", "sqrt", "square root"), ("ⁿ√", "root", "n-th root")],
+        [("|a|", "abs", "absolute value"), ("π", "pi", "the number π"),
+         ("e", "e", "the number e"), ("a/b", "/", "fraction")],
+        [("sin", "sin", "sine"), ("cos", "cos", "cosine"), ("tan", "tan", "tangent"),
+         ("cot", "cot", "cotangent")],
+        [("ln", "ln", "natural logarithm"), ("log", "log", "common (base-10) logarithm"),
+         ("logₐ", "logb", "logarithm with base a"), ("eˣ", "exp", "exponential")],
+        [("fn ▸", "__page__", "more functions: arcsin, arccos, sinh…"),
+         ("↑", "up", "cursor up (numerator)"), ("↓", "down", "cursor down (denominator)"),
+         ("", None, None)],
     ]
     LEFT_EXTRA = [
-        [("arcsin", "asin", None), ("arccos", "acos", None), ("arctan", "atan", None), ("sec", "sec", None)],
-        [("csc", "csc", None), ("sinh", "sinh", None), ("cosh", "cosh", None), ("tanh", "tanh", None)],
+        [("arcsin", "asin", "inverse sine"), ("arccos", "acos", "inverse cosine"),
+         ("arctan", "atan", "inverse tangent"), ("sec", "sec", "secant")],
+        [("csc", "csc", "cosecant"), ("sinh", "sinh", "hyperbolic sine"),
+         ("cosh", "cosh", "hyperbolic cosine"), ("tanh", "tanh", "hyperbolic tangent")],
     ]
     RIGHT = [
-        [("7", "7", None), ("8", "8", None), ("9", "9", None), ("÷", "/", "дробь")],
-        [("4", "4", None), ("5", "5", None), ("6", "6", None), ("×", "*", "умножить")],
-        [("1", "1", None), ("2", "2", None), ("3", "3", None), ("−", "-", "минус")],
-        [("0", "0", None), (".", ".", "десятичная точка"), ("=", "=", "равно (уравнение / x = c)"),
-         ("+", "+", "плюс")],
-        [("←", "left", "курсор влево"), ("→", "right", "курсор вправо"),
-         ("⌫", "backspace", "удалить"), ("C", "clear", "очистить поле")],
+        [("7", "7", None), ("8", "8", None), ("9", "9", None), ("÷", "/", "fraction")],
+        [("4", "4", None), ("5", "5", None), ("6", "6", None), ("×", "*", "multiply")],
+        [("1", "1", None), ("2", "2", None), ("3", "3", None), ("−", "-", "minus")],
+        [("0", "0", None), (".", ".", "decimal point"), ("=", "=", "equals (equation / x = c)"),
+         ("+", "+", "plus")],
+        [("←", "left", "cursor left"), ("→", "right", "cursor right"),
+         ("⌫", "backspace", "delete"), ("C", "clear", "clear the field")],
     ]
 
     KEY_MIN_W = 46   # минимальная ширина кнопки, px
@@ -299,6 +310,7 @@ class Keypad(tk.Frame):
                     fnt = (UI_FONT, 9)
                 if token == "__page__":
                     label = "fn ▸" if self._page == 0 else "◂ back"
+                    tip = "more functions: arcsin, arccos, sinh…" if self._page == 0 else "back to sin, cos, ln…"
                     fnt = (UI_FONT, 9)
                 # width=1 + minsize колонки: кнопки одинаковой ширины в пикселях
                 # независимо от шрифта (Segoe UI на Windows, DejaVu на Linux);
@@ -716,6 +728,7 @@ class App(tk.Tk):
 
     def __init__(self):
         super().__init__()
+        _resolve_ui_font(self)
         self.title("Function Visualizer — Ariadna")
         self.configure(bg=APP_BG)
         self.resizable(True, True)
@@ -979,18 +992,6 @@ class App(tk.Tk):
         tk.Label(row3, textvariable=self.font_size_var, bg=CARD_BG, fg=ACCENT,
                  font=(UI_FONT, 9, "bold"), width=3).pack(side="left", padx=2)
 
-        # Шрифт графика (подписи точек/делений рисуются mathtext'ом этого пресета)
-        row4 = tk.Frame(dg, bg=CARD_BG); row4.pack(fill="x", pady=(2, 2))
-        tk.Label(row4, text="Graph font:", bg=CARD_BG, fg=SUBTEXT,
-                 font=(UI_FONT, 9)).pack(side="left", padx=(6, 4))
-        self.font_choice_var = tk.StringVar(value=FONT_CHOICES[0][0])
-        om = tk.OptionMenu(row4, self.font_choice_var, *[c[0] for c in FONT_CHOICES])
-        om.config(bg=ENTRY_BG, fg=TEXT, activebackground=CARD_BG, activeforeground=TEXT,
-                  relief="flat", font=(UI_FONT, 9), bd=0, highlightthickness=1,
-                  highlightbackground=BORDER, width=22)
-        om["menu"].config(bg=ENTRY_BG, fg=TEXT, activebackground=ACCENT, font=(UI_FONT, 9))
-        om.pack(side="left")
-        self.font_choice_var.trace_add("write", lambda *_: self._on_font_change())
 
         # ── Fill ─────────────────────────────────────────────
         self.fill_card = card(p, "Area Fill")
@@ -1018,21 +1019,6 @@ class App(tk.Tk):
         small_button(bl, "Reset point labels", self._reset_point_labels).pack(side="left", padx=6)
 
         tk.Frame(p, bg=APP_BG, height=12).pack()
-
-    def _font_key(self):
-        label = self.font_choice_var.get()
-        return next((k for l, k in FONT_CHOICES if l == label), "times")
-
-    def _set_font_key(self, key):
-        label = next((l for l, k in FONT_CHOICES if k == key), FONT_CHOICES[0][0])
-        self.font_choice_var.set(label)
-
-    def _on_font_change(self):
-        try:
-            fv.apply_font_preset(self._font_key())
-        except Exception:
-            pass
-        self.schedule_redraw()
 
     def _live_int(self, value):
         var = tk.IntVar(value=value)
@@ -1613,7 +1599,6 @@ class App(tk.Tk):
                 "y_intercepts": self.v_ytag.get(), "intersections": self.v_inter.get(),
                 "show_values": self.v_show_values.get(), "hide_x": self.v_xhide.get(),
                 "hide_y": self.v_yhide.get(), "font_size": self.font_size_var.get(),
-                "font": self._font_key(),
             },
             "fills": [f.to_dict() for f in self.fill_rows],
             "free_texts": [dict(t) for t in fv.FREE_TEXTS],
@@ -1682,8 +1667,6 @@ class App(tk.Tk):
             self.v_show_values.set(int(d.get("show_values", 1)))
             self.v_xhide.set(int(d.get("hide_x", 0))); self.v_yhide.set(int(d.get("hide_y", 0)))
             self.font_size_var.set(int(d.get("font_size", 10)))
-            self._set_font_key(str(d.get("font", "times")))
-            fv.apply_font_preset(self._font_key())
 
             fv.FREE_TEXTS.clear()
             for t in data.get("free_texts", []):
