@@ -3244,7 +3244,7 @@ def _plot_function_impl(fig=None):
                                        above=(ey >= x_axis_y), color=color)
 
         # ── Пересечения с осью X ─────────────────
-        if X_TAG:
+        if X_TAG and Y_LIM_B <= 0 <= Y_LIM_T:      # ось X в окне
             for xi in x_intercepts:
                 mark_point(xi, x_axis_y, color)
                 if SHOW_VALUES:
@@ -3259,7 +3259,9 @@ def _plot_function_impl(fig=None):
 
         # ── Пересечение с осью Y ─────────────────
         is_removable_at_0 = any(abs(d - y_axis_x) < 1e-9 for d in removable_x)
-        if Y_TAG and y_intercept is not None and not is_removable_at_0:
+        # ось Y должна быть в окне: иначе точка (0, y) рисовалась бы на прижатой к краю оси
+        if (Y_TAG and y_intercept is not None and not is_removable_at_0
+                and X_LIM_L <= 0 <= X_LIM_R):
             mark_point(y_axis_x, y_intercept, color)
             if SHOW_VALUES:
                 yi_e = exact_y_of(expr, x_sym, Integer(0))
