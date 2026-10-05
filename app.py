@@ -27,6 +27,28 @@ import traceback
 import tkinter as tk
 from tkinter import messagebox, filedialog, colorchooser
 
+# ── DPI (Windows) ────────────────────────────────────────────
+# Без этого при масштабе монитора 125–200 % Windows растягивает окно как
+# картинку, и весь текст выглядит пикселизированным. Объявляем процесс
+# per-monitor DPI-aware ДО создания первого окна (и до импорта Tk-бэкенда
+# matplotlib); все пиксельные размеры интерфейса масштабируются через
+# UI_SCALE (см. App.__init__), шрифты в пунктах Tk масштабирует сам.
+if sys.platform == "win32":
+    try:
+        import ctypes
+        try:
+            _f = ctypes.windll.user32.SetProcessDpiAwarenessContext
+            _f.argtypes = [ctypes.c_void_p]
+            if not _f(ctypes.c_void_p(-4)):          # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+                raise OSError("SetProcessDpiAwarenessContext failed")
+        except Exception:
+            try:
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)   # PROCESS_PER_MONITOR_DPI_AWARE
+            except Exception:
+                ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
 # Фоновый поток sympy держит GIL подолгу; с интервалом переключения по
 # умолчанию (5 мс) тысячи мелких numpy/scipy-вызовов главного потока ждут
 # его каждый раз, и перерисовка во время «Refining labels…» замедляется в
@@ -112,7 +134,13 @@ ERR_COLOR = "#d9363e"
 
 FUNC_COLORS = fv.CURVE_COLORS  # берём из движка
 
-LEFT_PANEL_WIDTH = 500
+LEFT_PANEL_WIDTH = 500        # при 96 dpi; реальные пиксели — через _px()
+UI_SCALE = 1.0                # коэффициент DPI (1.5 при масштабе 150 %), задаётся в App.__init__
+
+
+def _px(v):
+    """Пиксельный размер, заданный для 96 dpi → реальные пиксели экрана."""
+    return int(round(v * UI_SCALE))
 REDRAW_DELAY_MS  = 250        # после правок в панели
 ZOOM_DELAY_MS    = 120        # после колеса мыши (предпросмотр уже показан)
 SYMBOLIC_TIMEOUT_S = 20.0     # сторож: пачка символьных заданий дольше этого — считается зависшей
@@ -310,7 +338,7 @@ class Keypad(tk.Frame):
          ("⌫", "backspace", "delete"), ("C", "clear", "clear the field")],
     ]
 
-    KEY_MIN_W = 46   # минимальная ширина кнопки, px
+    KEY_MIN_W = 46   # минимальная ширина кнопки, px при 96 dpi
 
     def __init__(self, parent, on_token, **kw):
         super().__init__(parent, bg=CARD_BG, **kw)
@@ -344,7 +372,7 @@ class Keypad(tk.Frame):
         for r, row in enumerate(rows):
             for c, (label, token, tip) in enumerate(row):
                 if token is None:
-                    tk.Frame(parent, bg=CARD_BG, width=self.KEY_MIN_W, height=28).grid(row=r, column=c)
+                    tk.Frame(parent, bg=CARD_BG, width=_px(self.KEY_MIN_W), height=_px(28)).grid(row=r, column=c)
                     continue
                 is_digit = numeric and (label.isdigit() or label == ".")
                 bg = KEY_BG2 if is_digit else KEY_BG
@@ -356,16 +384,18 @@ class Keypad(tk.Frame):
                     tip = "more functions: arcsin, arccos, sinh…" if self._page == 0 else "back to sin, cos, ln…"
                     fnt = (UI_FONT, 9)
                 # width=1 + minsize колонки: кнопки одинаковой ширины в пикселях
-                # независимо от шрифта (Segoe UI на Windows, DejaVu на Linux);
-                # длинные подписи (arcsin, logₐ) сами расширяют свою колонку.
-                b = tk.Button(parent, text=label, bg=bg, fg=KEY_FG, font=fnt,
+                # независимо от шрифта; длинные подписи (arcsin, logₐ) сами
+                # расширяют свою колонку. Рамка — отдельный Frame в 1 px: Tk на
+                # Windows не рисует highlight-рамку у кнопок без фокуса.
+                holder = tk.Frame(parent, bg=BORDER, padx=1, pady=1)
+                b = tk.Button(holder, text=label, bg=bg, fg=KEY_FG, font=fnt,
                               relief="flat", bd=0, cursor="hand2", width=1, padx=4, pady=3,
                               activebackground="#dde3ea", activeforeground=KEY_FG,
-                              highlightthickness=1, highlightbackground=BORDER,
-                              takefocus=0,
+                              highlightthickness=0, takefocus=0,
                               command=lambda t=token: self._press(t))
-                b.grid(row=r, column=c, padx=1, pady=1, sticky="nsew")
-                parent.grid_columnconfigure(c, minsize=self.KEY_MIN_W)
+                b.pack(fill="both", expand=True)
+                holder.grid(row=r, column=c, padx=1, pady=1, sticky="nsew")
+                parent.grid_columnconfigure(c, minsize=_px(self.KEY_MIN_W))
                 if tip:
                     Tooltip(b, tip)
 
@@ -406,8 +436,8 @@ class FuncRow:
         self.dot.pack(side="left", padx=(2, 6))
 
         # Поле формулы — 2-D редактор без клавиатуры (ввод с экранной клавиатуры)
-        self.editor = MathEditor(self.frame, font_size=15, on_change=lambda _e: on_change(),
-                                 on_focus=lambda e: on_focus(self), width=260, height=40)
+        self.editor = MathEditor(self.frame, font_size=_px(15), on_change=lambda _e: on_change(),
+                                 on_focus=lambda e: on_focus(self), width=_px(260), height=_px(40))
         self.editor.pack(side="left", padx=2, fill="x", expand=True)
 
         # Кнопка удалить
@@ -614,7 +644,7 @@ class FillRow:
             on_change()
 
         tk.Scale(self.frame2, from_=0, to=100, orient="horizontal",
-                 variable=self.density_var, length=110, resolution=5,
+                 variable=self.density_var, length=_px(110), resolution=5,
                  bg=CARD_BG, fg=TEXT, troughcolor=ACCENT, activebackground=BTN_DEL,
                  highlightthickness=0, bd=0, sliderrelief="flat", showvalue=False,
                  command=_on_density, font=(UI_FONT, 7)).pack(side="left")
@@ -772,11 +802,12 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         _resolve_ui_font(self)
+        self._init_dpi_scale()
         self.title("Function Visualizer — Ariadna")
         self.configure(bg=APP_BG)
         self.resizable(True, True)
-        self.minsize(980, 640)
-        self.geometry("1320x820")
+        self.minsize(_px(980), _px(640))
+        self.geometry(f"{_px(1320)}x{_px(820)}")
 
         self.func_rows = []
         self.fill_rows = []
@@ -823,6 +854,25 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._poll_job = self.after(200, self._poll_worker)
         self.schedule_redraw()
+
+    def _init_dpi_scale(self):
+        """
+        UI_SCALE = DPI экрана / 96 (на Windows с DPI-awareness Tk сообщает
+        реальный DPI; при масштабе 150 % получаем 1.5). Переменная окружения
+        FV_UI_SCALE задаёт коэффициент принудительно (и для отладки под Xvfb).
+        """
+        global UI_SCALE
+        forced = os.environ.get("FV_UI_SCALE")
+        try:
+            if forced:
+                UI_SCALE = float(forced)
+                # шрифты в пунктах тоже должны вырасти — как сделал бы Tk при реальном DPI
+                self.tk.call('tk', 'scaling', UI_SCALE * 96.0 / 72.0)
+            else:
+                UI_SCALE = self.winfo_fpixels('1i') / 96.0
+        except Exception:
+            UI_SCALE = 1.0
+        UI_SCALE = max(0.75, min(4.0, UI_SCALE))
 
     # ── Ctrl+C/X/V/A независимо от раскладки клавиатуры ─────
     def _setup_clipboard_shortcuts(self):
@@ -874,7 +924,7 @@ class App(tk.Tk):
     # ══════════════════════════════════════════════════════════
     def _build_ui(self):
         # ── Левая колонка (настройки) ───────────────────────
-        left = tk.Frame(self, bg=APP_BG, width=LEFT_PANEL_WIDTH)
+        left = tk.Frame(self, bg=APP_BG, width=_px(LEFT_PANEL_WIDTH))
         left.pack(side="left", fill="y")
         left.pack_propagate(False)
 
@@ -892,7 +942,7 @@ class App(tk.Tk):
         try:
             from PIL import Image, ImageTk
             img = Image.open(_resource_path("ariadna-logo1-trnsp.png")).convert("RGBA")
-            h = 64
+            h = _px(64)
             w = int(img.width * h / img.height)
             img = img.resize((w, h), Image.LANCZOS)
             self._logo_img = ImageTk.PhotoImage(img)
@@ -1029,7 +1079,7 @@ class App(tk.Tk):
                  font=(UI_FONT, 9)).pack(side="left", padx=(6, 4))
         self.font_size_var = tk.IntVar(value=10)
         tk.Scale(row3, from_=6, to=20, orient="horizontal", variable=self.font_size_var,
-                 length=160, bg=CARD_BG, fg=TEXT, troughcolor=ACCENT, activebackground=BTN_DEL,
+                 length=_px(160), bg=CARD_BG, fg=TEXT, troughcolor=ACCENT, activebackground=BTN_DEL,
                  highlightthickness=0, bd=0, sliderrelief="flat", font=(UI_FONT, 8),
                  command=lambda _v: self.schedule_redraw()).pack(side="left")
         tk.Label(row3, textvariable=self.font_size_var, bg=CARD_BG, fg=ACCENT,
@@ -1055,7 +1105,7 @@ class App(tk.Tk):
                       "Drag to move, scroll to rotate, right-click for options. "
                       "Point labels can be dragged too.",
                  bg=CARD_BG, fg=SUBTEXT, font=(UI_FONT, 8),
-                 wraplength=LEFT_PANEL_WIDTH - 60, justify="left").pack(anchor="w", padx=10, pady=(0, 6))
+                 wraplength=_px(LEFT_PANEL_WIDTH - 60), justify="left").pack(anchor="w", padx=10, pady=(0, 6))
         bl = tk.Frame(labels_card, bg=CARD_BG)
         bl.pack(anchor="w", padx=10, pady=(0, 8))
         small_button(bl, "Clear all labels", self._clear_labels).pack(side="left")
