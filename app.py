@@ -245,7 +245,7 @@ STRINGS_HE = {
     "right-click for options. Point labels can be dragged too.":
         "לחיצה כפולה על מקום ריק בגרף מוסיפה תווית. גרירה - הזזה, גלגלת - סיבוב, "
         "לחיצה ימנית - אפשרויות. גם תוויות נקודות ניתנות לגרירה.",
-    "Clear all labels": "נקה את כל התוויות", "Reset point labels": "אפס תוויות נקודות",
+    "Clear all labels": "נקה את כל התוויות",
     "  Save image…": "שמור תמונה…", "Reset view": "איפוס תצוגה",
     "Save project": "שמור פרויקט", "Open project": "פתח פרויקט",
     # строки функции / заливки
@@ -357,7 +357,7 @@ STRINGS_RU = {
     "right-click for options. Point labels can be dragged too.":
         "Двойной щелчок по пустому месту графика добавляет подпись. Перетаскивание - перемещение, "
         "колесо - поворот, правая кнопка - меню. Подписи точек тоже можно перетаскивать.",
-    "Clear all labels": "Удалить все подписи", "Reset point labels": "Сбросить подписи точек",
+    "Clear all labels": "Удалить все подписи",
     "  Save image…": "  Сохранить картинку…", "Reset view": "Сбросить вид",
     "Save project": "Сохранить проект", "Open project": "Открыть проект",
     # строки функции / заливки
@@ -1655,7 +1655,6 @@ class App(tk.Tk):
         bl = tk.Frame(labels_card, bg=CARD_BG)
         bl.pack(anchor=anchor_start(), padx=10, pady=(0, 8))
         small_button(bl, "Clear all labels", self._clear_labels).pack(side=side())
-        small_button(bl, "Reset point labels", self._reset_point_labels).pack(side=side(), padx=6)
 
         tk.Frame(p, bg=APP_BG, height=12).pack()
 
@@ -1754,11 +1753,6 @@ class App(tk.Tk):
                                    he_display(T("Remove all {n} label(s) added on the graph?", n=len(fv.FREE_TEXTS)))):
             return
         fv.FREE_TEXTS.clear()
-        self.schedule_redraw()
-
-    def _reset_point_labels(self):
-        """Вернуть все перетащенные подписи точек в положение по умолчанию."""
-        fv.reset_annotation_offsets()
         self.schedule_redraw()
 
     # ══════════════════════════════════════════════════════════
