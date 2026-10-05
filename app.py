@@ -27,6 +27,15 @@ import traceback
 import tkinter as tk
 from tkinter import messagebox, filedialog, colorchooser
 
+# Фоновый поток sympy держит GIL подолгу; с интервалом переключения по
+# умолчанию (5 мс) тысячи мелких numpy/scipy-вызовов главного потока ждут
+# его каждый раз, и перерисовка во время «Refining labels…» замедляется в
+# разы. Короткий интервал почти убирает этот эффект.
+try:
+    sys.setswitchinterval(0.0005)
+except Exception:
+    pass
+
 import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.figure import Figure

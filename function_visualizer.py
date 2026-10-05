@@ -955,10 +955,13 @@ def classify_discontinuities(f, expr_sympy, disc_pts, y_lim_b, y_lim_t,
         pt_arg = pt_exact if pt_exact is not None else dp
         try:
             key_base = ('lim', str(expr_sympy), str(pt_arg))
+            # ВАЖНО: точку связываем параметром по умолчанию — в режиме
+            # 'cached' лямбда выполняется позже, когда переменная цикла уже
+            # указывает на последнюю точку.
             lv_p = sym_cached(key_base + ('+',),
-                              lambda: limit(expr_sympy, x_sym, pt_arg, '+'))
+                              lambda p=pt_arg: limit(expr_sympy, x_sym, p, '+'))
             lv_m = sym_cached(key_base + ('-',),
-                              lambda: limit(expr_sympy, x_sym, pt_arg, '-'))
+                              lambda p=pt_arg: limit(expr_sympy, x_sym, p, '-'))
             if lv_p in (oo, -oo, zoo) or lv_m in (oo, -oo, zoo):
                 vasymps.append(dp)
                 continue
@@ -1765,13 +1768,28 @@ def find_x_intercepts(f, x_vals, y_vals, disc_pts, allow_pi=True, allow_e=True):
         return v if np.isfinite(v) else float('nan')
 
     n = len(y_vals)
+
+    def isolated_zero(i):
+        """Точный ноль в узле i — корень, только если соседние узлы ненулевые
+        (иначе это плато f ≡ 0, и подписывать каждый узел бессмысленно)."""
+        if i > 0:
+            yp = y_vals[i - 1]
+            if not np.isfinite(yp) or yp == 0.0:
+                return False
+        if i + 1 < n:
+            yn = y_vals[i + 1]
+            if not np.isfinite(yn) or yn == 0.0:
+                return False
+        return True
+
     for i in range(n - 1):
         y0, y1 = y_vals[i], y_vals[i + 1]
         x0, x1 = x_vals[i], x_vals[i + 1]
         if not (np.isfinite(y0) and np.isfinite(y1)):
             continue
         if y0 == 0.0:
-            add_zero(x0)
+            if isolated_zero(i):
+                add_zero(x0)
             continue
         if y0 * y1 < 0:
             try:
@@ -1779,7 +1797,7 @@ def find_x_intercepts(f, x_vals, y_vals, disc_pts, allow_pi=True, allow_e=True):
                 add_zero(xz)
             except Exception:
                 pass
-    if n and np.isfinite(y_vals[-1]) and y_vals[-1] == 0.0:
+    if n and np.isfinite(y_vals[-1]) and y_vals[-1] == 0.0 and isolated_zero(n - 1):
         add_zero(x_vals[-1])
 
     return sorted(zeros)
@@ -1850,9 +1868,13 @@ def find_intersections(f1, f2, x_vals, y1_vals, y2_vals, disc_pts_x):
         if not (np.isfinite(d0) and np.isfinite(d1)):
             continue
 
-        # Точное совпадение в узле сетки
+        # Точное совпадение в узле сетки — только изолированное (соседние
+        # узлы ненулевые), иначе кривые совпадают на отрезке и подписывать
+        # каждый узел бессмысленно
         if d0 == 0.0:
-            add_point(x0)
+            prev_ok = (i == 0) or (np.isfinite(diff_arr[i - 1]) and diff_arr[i - 1] != 0.0)
+            if prev_ok and d1 != 0.0:
+                add_point(x0)
             continue
 
         # Случай 1: знакосмена → обычное пересечение
@@ -2439,7 +2461,7 @@ def _short_error(exc):
         from sympy import SympifyError
     except Exception:          # pragma: no cover
         SympifyError = ()
-    if isinstance(exc, (SyntaxError, TokenError, SympifyError)):
+    if isinstance(exc, (SyntaxError, TokenError, SympifyError, IndexError)):
         return "Syntax error"
     if isinstance(exc, NameError):
         msg = str(exc).strip()
@@ -2616,7 +2638,7 @@ def plot_function(fig=None):
             return '0'
         # fmt_num распознаёт кратные π (знаменатели 1,2,3,4,6) и e; численные
         # значения теперь точны до ~1e-10, поэтому допуск узкий.
-        s = fmt_num(v, tol=1e-6)
+        s = fmt_num(v, tol=1e-9)
         if 'π' in s or 'e' in s:
             return s
         s = f'{v:.2f}'
@@ -2839,6 +2861,8 @@ def plot_function(fig=None):
         curve_meta.append({'kind': 'implicit', 'color': color, 'h': h, 'H': H_sym})
 
     def draw_func(func_idx, func_str, color, lw, ls):
+        if not str(func_str).strip():
+            raise SyntaxError("empty expression")      # напр. 'y=' без правой части
         expr, expr_raw, f = build_numpy_func(func_str)
         x_sym = _get_x(expr)
 
@@ -3003,8 +3027,15 @@ def plot_function(fig=None):
             return f'#{r:02x}{g:02x}{b:02x}'
 
         def emit(ix, iy, pt_color, probe_f=None, cx=None, cy=None):
-            if not (Y_LIM_B <= iy <= Y_LIM_T and X_LIM_L <= ix <= X_LIM_R):
+            # Допуск на границе окна: точка (3, 5) при Y_LIM_T = 5 не должна
+            # пропадать из-за 5.000000000000037 от brentq
+            eps_x = 1e-9 * max(1.0, X_LIM_R - X_LIM_L)
+            eps_y = 1e-9 * max(1.0, Y_LIM_T - Y_LIM_B)
+            if not (Y_LIM_B - eps_y <= iy <= Y_LIM_T + eps_y
+                    and X_LIM_L - eps_x <= ix <= X_LIM_R + eps_x):
                 return
+            ix = min(max(ix, X_LIM_L), X_LIM_R)
+            iy = min(max(iy, Y_LIM_B), Y_LIM_T)
             mark_point(ix, iy, pt_color, markersize=5, zorder=11)
             if SHOW_VALUES:
                 above = iy >= x_axis_y
