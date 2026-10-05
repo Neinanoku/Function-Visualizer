@@ -1383,12 +1383,30 @@ class App(tk.Tk):
                 self._set_status("Some functions are incomplete or invalid — hover the red field",
                                  ERR_COLOR)
             else:
-                self._set_status("Ready")
+                self._set_status("Ready" + self._visible_range_note(result.get('ax')))
         finally:
             self._drawing = False
             if self._redraw_wanted and self._pan is None:
                 self._redraw_wanted = False
                 self.schedule_redraw()
+
+    def _visible_range_note(self, ax):
+        """«· visible x −8.33…8.33» — когда холст шире/выше окна и видно больше, чем задано."""
+        try:
+            lims = self._current_limits()
+            if ax is None or lims is None:
+                return ""
+            xl, xr = ax.get_xlim()
+            yb, yt = ax.get_ylim()
+            def g(v):
+                return f"{v:.4g}".replace("-", "\u2212")
+            if abs(xr - xl - (lims[1] - lims[0])) > 1e-9 * max(1.0, abs(xr - xl)):
+                return f"  ·  visible x: {g(xl)} … {g(xr)}"
+            if abs(yt - yb - (lims[3] - lims[2])) > 1e-9 * max(1.0, abs(yt - yb)):
+                return f"  ·  visible y: {g(yb)} … {g(yt)}"
+        except Exception:
+            pass
+        return ""
 
     def _restore_last_good(self):
         """После сбоя построения возвращаем на холст последний удачный график."""

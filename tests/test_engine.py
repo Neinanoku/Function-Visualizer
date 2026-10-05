@@ -779,3 +779,23 @@ def test_font_presets_apply():
     fv.apply_font_preset("nonsense")
     assert fv.GRAPH_FONT == "schola"           # неизвестное имя → пресет по умолчанию
     fv.apply_font_preset("schola")
+
+
+def test_effective_limits_extend_to_canvas():
+    fv.X_LIM_L, fv.X_LIM_R, fv.Y_LIM_B, fv.Y_LIM_T = -5, 5, -5, 5
+    assert fv.effective_limits(600, 600) == (-5, 5, -5, 5)
+    xl, xr, yb, yt = fv.effective_limits(1200, 600)        # вдвое шире — x расширяется вдвое
+    assert (xl, xr) == pytest.approx((-10, 10)) and (yb, yt) == (-5, 5)
+    xl, xr, yb, yt = fv.effective_limits(600, 900)         # выше — расширяется y
+    assert (xl, xr) == (-5, 5) and (yb, yt) == pytest.approx((-7.5, 7.5))
+    # при построении на широкой фигуре пределы осей расширены, а глобалы не тронуты
+    fig = Figure(figsize=(12, 6), dpi=100)
+    FigureCanvasAgg(fig)
+    res = draw(["sin(x)"], fig=fig)
+    assert res['ax'].get_xlim() == pytest.approx((-10, 10))
+    assert res['ax'].get_ylim() == pytest.approx((-5, 5))
+    assert (fv.X_LIM_L, fv.X_LIM_R) == (-5, 5)
+    # кривая и подписи заполняют расширенную область
+    xs = res['ax'].lines[0].get_xdata()
+    assert len(xs) > 100 and xs.min() < -9 and xs.max() > 9 or any(
+        len(l.get_xdata()) > 100 and l.get_xdata().min() < -9 for l in res['ax'].lines)

@@ -2717,17 +2717,64 @@ def _disconnect_previous():
         _active_axis_label_manager = None
 
 
+# View Window «вписывается» в холст по МЕНЬШЕЙ стороне, а по большей стороне
+# показывается дополнительный диапазон (масштаб тот же). Так сетка остаётся
+# квадратной, пока диапазоны X и Y равны, а при увеличении окна оси не
+# растягиваются, а удлиняются в сторону роста окна. False — старое
+# поведение: окно растягивается точно на холст.
+EXTEND_TO_CANVAS = True
+
+
+def effective_limits(w_px, h_px):
+    """
+    Видимые пределы для холста w_px×h_px при текущем View Window: окно
+    занимает меньшую сторону холста целиком, лишнее место по большей
+    стороне добавляет диапазон симметрично с обеих сторон.
+    """
+    xl, xr, yb, yt = X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T
+    try:
+        w_px = float(w_px)
+        h_px = float(h_px)
+        if w_px > h_px > 0:
+            extra = (xr - xl) * (w_px / h_px - 1.0) / 2.0
+            xl, xr = xl - extra, xr + extra
+        elif h_px > w_px > 0:
+            extra = (yt - yb) * (h_px / w_px - 1.0) / 2.0
+            yb, yt = yb - extra, yt + extra
+    except Exception:
+        pass
+    return xl, xr, yb, yt
+
+
 def plot_function(fig=None):
     """
     Строит график по текущим настройкам модуля.
-      fig=None — standalone: своя фигура 6×6, tight_layout, plt.show().
+      fig=None — standalone: своя фигура 6×6, plt.show().
       fig задана — очищает её, рисует в fig.add_subplot(111), plt.show() НЕ
-      вызывает (GUI с встроенным холстом).
+      вызывает (GUI с встроенным холстом). При EXTEND_TO_CANVAS пределы
+      расширяются под пропорции холста (см. effective_limits).
     Возвращает {'ax': ax, 'errors': {индекс_функции: сообщение},
                 'pending': были ли отложены символьные вычисления}.
     Ошибка одной кривой не роняет весь график: она попадает в errors,
     остальные кривые рисуются.
     """
+    global X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T
+    saved = (X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T)
+    if fig is not None and EXTEND_TO_CANVAS:
+        try:
+            w_px = fig.get_figwidth() * fig.dpi
+            h_px = fig.get_figheight() * fig.dpi
+            X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T = effective_limits(w_px, h_px)
+        except Exception:
+            X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T = saved
+    try:
+        return _plot_function_impl(fig)
+    finally:
+        # Настройки пользователя (View Window) не трогаем — вернуть как было
+        X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T = saved
+
+
+def _plot_function_impl(fig=None):
     global CURVE_WIDTHS, CURVE_STYLES, CURVE_COLORS
     global _active_free_text_manager, _active_axis_label_manager
 
@@ -2764,10 +2811,10 @@ def plot_function(fig=None):
     ax.set_xlim(X_LIM_L, X_LIM_R)
     ax.set_ylim(Y_LIM_B, Y_LIM_T)
 
-    # Область построения всегда занимает всю фигуру (фиксированные поля), а
-    # View Window растягивает сам график: масштабы по X и Y независимы
-    # ('auto'), клетки сетки могут быть прямоугольными. Раньше стояло
-    # 'equal' — квадратные клетки ценой «усадки» рамки осей.
+    # Область построения всегда занимает всю фигуру; пределы уже подогнаны
+    # под пропорции холста (effective_limits), поэтому при равных диапазонах
+    # X и Y клетки сетки квадратные, а при разных — график растянут так,
+    # как задано View Window.
     ax.set_aspect('auto')
     try:
         # Границы осей совпадают с границами холста: полей нет вовсе
