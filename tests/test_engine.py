@@ -788,17 +788,52 @@ def test_effective_limits_extend_to_canvas():
     assert (xl, xr) == pytest.approx((-10, 10)) and (yb, yt) == (-5, 5)
     xl, xr, yb, yt = fv.effective_limits(600, 900)         # выше — расширяется y
     assert (xl, xr) == (-5, 5) and (yb, yt) == pytest.approx((-7.5, 7.5))
-    # при построении на широкой фигуре пределы осей расширены, а глобалы не тронуты
+    # при построении на широкой фигуре пределы осей расширены (по области
+    # построения = фигура минус поля PLOT_MARGIN_PX), а глобалы не тронуты
     fig = Figure(figsize=(12, 6), dpi=100)
     FigureCanvasAgg(fig)
     res = draw(["sin(x)"], fig=fig)
-    assert res['ax'].get_xlim() == pytest.approx((-10, 10))
+    m = fv.PLOT_MARGIN_PX
+    exp = fv.effective_limits(1200 - 2 * m, 600 - 2 * m)
+    assert res['ax'].get_xlim() == pytest.approx(exp[:2])
     assert res['ax'].get_ylim() == pytest.approx((-5, 5))
     assert (fv.X_LIM_L, fv.X_LIM_R) == (-5, 5)
     # кривая и подписи заполняют расширенную область
     xs = res['ax'].lines[0].get_xdata()
     assert len(xs) > 100 and xs.min() < -9 and xs.max() > 9 or any(
         len(l.get_xdata()) > 100 and l.get_xdata().min() < -9 for l in res['ax'].lines)
+
+
+def test_plot_margins_and_axis_labels():
+    """Поля 20 px вокруг области построения; «x» справа от стрелки оси X,
+    «y» над стрелкой оси Y — в полях; подписи осей не перетаскиваются."""
+    fig = Figure(figsize=(8, 6), dpi=100)
+    FigureCanvasAgg(fig)
+    fv.AXIS_LABELS['x'].update({'dx': 7.0, 'dy': -3.0})       # «старый» сдвиг игнорируется
+    res = draw(["x^2"], fig=fig)
+    ax = res['ax']
+    m = fv.PLOT_MARGIN_PX
+    pos = ax.get_position()
+    assert pos.x0 * 800 == pytest.approx(m, abs=0.6) and (1 - pos.x1) * 800 == pytest.approx(m, abs=0.6)
+    assert pos.y0 * 600 == pytest.approx(m, abs=0.6) and (1 - pos.y1) * 600 == pytest.approx(m, abs=0.6)
+    assert fv.plot_box_px(fig) == (m, m, 800 - m, 600 - m)
+    fig.canvas.draw()
+    mgr = fv._active_axis_label_manager
+    lx, ly = mgr.artists['x'], mgr.artists['y']
+    ax_bb = ax.get_window_extent()
+    bx = lx.get_window_extent(); by = ly.get_window_extent()
+    assert bx.x0 >= ax_bb.x1 - 0.5 and bx.x1 <= 800 + 0.5          # «x» в правом поле
+    assert by.y0 >= ax_bb.y1 - 0.5 and by.y1 <= 600 + 0.5          # «y» в верхнем поле
+    assert fv.AXIS_LABELS['x']['dx'] == 0.0 and fv.AXIS_LABELS['x']['dy'] == 0.0
+    # перетаскивание отключено: on_press левой кнопкой ничего не захватывает
+    class Ev:
+        x, y, button, guiEvent = bx.x0 + 1, bx.y0 + 1, 1, None
+    mgr.on_press(Ev()); assert mgr.drag is None
+    Ev.x += 30; mgr.on_motion(Ev())
+    assert fv.AXIS_LABELS['x']['dx'] == 0.0
+    # кривая не выходит за область построения: все точки внутри пределов осей
+    xs = ax.lines[0].get_xdata()
+    assert xs.min() >= ax.get_xlim()[0] - 1e-9 and xs.max() <= ax.get_xlim()[1] + 1e-9
 
 
 def test_grid_far_from_origin():

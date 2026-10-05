@@ -2625,10 +2625,10 @@ class FreeTextManager:
 #  ПОДПИСИ ОСЕЙ "x" / "y" — тоже интерактивные
 # ══════════════════════════════════════════════════════════════
 
-# Персистентные пользовательские настройки подписей осей: смещение от
-# "домашнего" положения (в пунктах), цвет и размер. Переживают повторное
-# построение графика. dx/dy — это пользовательский сдвиг поверх стандартного
-# положения; домашнее положение (само по себе) при этом не меняется.
+# Персистентные пользовательские настройки подписей осей: цвет и размер.
+# Переживают повторное построение графика. dx/dy оставлены для совместимости
+# файлов проектов и всегда равны 0: подписи «x»/«y» стоят на фиксированном
+# месте в полях за стрелками и не перетаскиваются.
 AXIS_LABELS = {
     'x': {'dx': 0.0, 'dy': 0.0, 'color': None, 'fontsize': None},
     'y': {'dx': 0.0, 'dy': 0.0, 'color': None, 'fontsize': None},
@@ -2639,11 +2639,9 @@ _active_axis_label_manager = None
 
 class AxisLabelManager:
     """
-    Делает подписи осей "x" и "y" интерактивными:
-      • левый клик + перетаскивание — переместить подпись
-      • правый клик — контекстное меню: цвет, размер, сбросить положение
+    Подписи осей "x" и "y": положение фиксировано (в полях за стрелками,
+    перетаскивать нельзя), правый клик — контекстное меню: цвет, размер.
     Удалять/добавлять эти подписи нельзя (в отличие от свободных).
-    "Домашнее" положение фиксировано; Reset position возвращает к нему.
     """
 
     def __init__(self, fig, ax, artists, home_offsets, default_fontsize):
@@ -2685,15 +2683,15 @@ class AxisLabelManager:
         self.drag = None
 
     def _apply_offset(self, key):
-        # Итоговое смещение = домашнее + пользовательский сдвиг (в пунктах)
+        # Фиксированное смещение от конца стрелки (в пунктах); пользовательский
+        # сдвиг не применяется — подписи осей не перетаскиваются.
         from matplotlib.transforms import ScaledTranslation
         hx, hy = self.home[key]
-        st = AXIS_LABELS[key]
+        AXIS_LABELS[key]['dx'] = 0.0
+        AXIS_LABELS[key]['dy'] = 0.0
         self.artists[key].set_transform(
             self.ax.transData +
-            ScaledTranslation((hx + st['dx']) / 72.0,
-                              (hy + st['dy']) / 72.0,
-                              self.fig.dpi_scale_trans))
+            ScaledTranslation(hx / 72.0, hy / 72.0, self.fig.dpi_scale_trans))
 
     def _hit(self, event):
         for key, art in self.artists.items():
@@ -2722,23 +2720,10 @@ class AxisLabelManager:
         if event.button == 3:
             self.drag = None
             self._menu(event, key)
-            return
-        if event.button == 1:
-            self.drag = (key, event.x, event.y,
-                         AXIS_LABELS[key]['dx'], AXIS_LABELS[key]['dy'])
 
     def on_motion(self, event):
-        if self.drag is None:
-            return
-        key, px0, py0, dx0, dy0 = self.drag
-        if event.x is None or event.y is None:
-            return
-        # Перемещение мыши в пикселях -> в пункты (1 пункт = dpi/72 пикселей)
-        scale = 72.0 / self.fig.dpi
-        AXIS_LABELS[key]['dx'] = dx0 + (event.x - px0) * scale
-        AXIS_LABELS[key]['dy'] = dy0 + (event.y - py0) * scale
-        self._apply_offset(key)
-        self.fig.canvas.draw_idle()
+        # Подписи осей не перетаскиваются
+        return
 
     def on_release(self, event):
         self.drag = None
@@ -2761,12 +2746,6 @@ class AxisLabelManager:
         self.artists[key].set_fontsize(size)
         self.fig.canvas.draw_idle()
 
-    def _reset_position(self, key):
-        AXIS_LABELS[key]['dx'] = 0.0
-        AXIS_LABELS[key]['dy'] = 0.0
-        self._apply_offset(key)
-        self.fig.canvas.draw_idle()
-
     def _menu(self, event, key):
         import tkinter as tk
         root = self._tk_root()
@@ -2780,9 +2759,6 @@ class AxisLabelManager:
             sub.add_command(label=str(size),
                             command=lambda s=size: self._set_size(key, s))
         menu.add_cascade(label=tr("Label size"), menu=sub)
-        menu.add_separator()
-        menu.add_command(label=tr("Reset position"),
-                          command=lambda: self._reset_position(key))
         try:
             menu.tk_popup(event.guiEvent.x_root, event.guiEvent.y_root)
         finally:
@@ -2883,6 +2859,45 @@ def _disconnect_previous():
 # поведение: окно растягивается точно на холст.
 EXTEND_TO_CANVAS = True
 
+# Поля вокруг области построения, в логических пикселях экрана: сетка, оси
+# и графики отступают от краёв холста на это расстояние, а названия осей
+# «x» и «y» стоят в полях за концами стрелок.
+PLOT_MARGIN_PX = 20
+
+
+def _margin_px(fig):
+    """
+    Поле в пикселях фигуры. На HiDPI-экране Tk-холст работает в физических
+    пикселях (device_pixel_ratio), поэтому логические 20 px масштабируем.
+    Если название оси («x»/«y», размер 1.1 × Label size) не помещается в
+    20 px, поле расширяется ровно настолько, чтобы подпись не обрезалась.
+    """
+    ratio = 1.0
+    try:
+        ratio = float(getattr(fig.canvas, 'device_pixel_ratio', 1.0) or 1.0)
+    except Exception:
+        pass
+    base = PLOT_MARGIN_PX * ratio
+    try:
+        axis_fs = max(6, int(max(4, min(24, FONT_SIZE)) * 1.1))       # как AXIS_FS в _plot_function_impl
+        label_px = axis_fs * fig.dpi / 72.0                            # высота строки подписи
+        need = label_px * 1.15 + 2.0 * ratio                           # + отступ от стрелки
+        return max(base, need)
+    except Exception:
+        return base
+
+
+def plot_box_px(fig):
+    """(x0, y0, x1, y1) области построения в пикселях фигуры (поля вычтены);
+    поля симметричны, поэтому направление оси Y не важно."""
+    try:
+        W = fig.get_figwidth() * fig.dpi
+        H = fig.get_figheight() * fig.dpi
+        m = min(_margin_px(fig), W * 0.45, H * 0.45)
+        return (int(round(m)), int(round(m)), int(round(W - m)), int(round(H - m)))
+    except Exception:
+        return None
+
 
 def effective_limits(w_px, h_px):
     """
@@ -2921,8 +2936,10 @@ def plot_function(fig=None):
     saved = (X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T)
     if fig is not None and EXTEND_TO_CANVAS:
         try:
-            w_px = fig.get_figwidth() * fig.dpi
-            h_px = fig.get_figheight() * fig.dpi
+            # Пропорции считаем по области построения (холст минус поля)
+            m = _margin_px(fig)
+            w_px = max(1.0, fig.get_figwidth() * fig.dpi - 2 * m)
+            h_px = max(1.0, fig.get_figheight() * fig.dpi - 2 * m)
             X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T = effective_limits(w_px, h_px)
         except Exception:
             X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T = saved
@@ -2970,14 +2987,18 @@ def _plot_function_impl(fig=None):
     ax.set_xlim(X_LIM_L, X_LIM_R)
     ax.set_ylim(Y_LIM_B, Y_LIM_T)
 
-    # Область построения всегда занимает всю фигуру; пределы уже подогнаны
-    # под пропорции холста (effective_limits), поэтому при равных диапазонах
-    # X и Y клетки сетки квадратные, а при разных — график растянут так,
-    # как задано View Window.
+    # Область построения занимает всю фигуру за вычетом полей PLOT_MARGIN_PX
+    # с каждой стороны; пределы уже подогнаны под её пропорции
+    # (effective_limits), поэтому при равных диапазонах X и Y клетки сетки
+    # квадратные, а при разных — график растянут так, как задано View Window.
     ax.set_aspect('auto')
     try:
-        # Границы осей совпадают с границами холста: полей нет вовсе
-        fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
+        _W = max(1.0, fig.get_figwidth() * fig.dpi)
+        _H = max(1.0, fig.get_figheight() * fig.dpi)
+        _m = _margin_px(fig)
+        _fx = min(0.45, _m / _W)
+        _fy = min(0.45, _m / _H)
+        fig.subplots_adjust(left=_fx, right=1.0 - _fx, bottom=_fy, top=1.0 - _fy)
     except Exception:
         pass
     # Размер осей в пикселях — для штриховки под 45° на ЭКРАНЕ и смещений
@@ -3029,16 +3050,16 @@ def _plot_function_impl(fig=None):
                 arrowprops=dict(arrowstyle='->', color=LABEL_COLOR,
                                 lw=1.2, mutation_scale=12), zorder=4)
 
-    # Подписи осей — ВНУТРИ области построения (у полей нулевая ширина):
-    # «x» над стрелкой у правого края, «y» справа от стрелки у верхнего.
+    # Подписи осей — в полях, за концами стрелок: «x» справа от стрелки
+    # оси X, «y» над стрелкой оси Y. Не перетаскиваются.
     _axis_label_x = ax.text(X_LIM_R, x_axis_y, "$x$" if MATHTEXT_LABELS else "x",
-                ha='right', va='bottom', fontsize=AXIS_FS, color=LABEL_COLOR,
+                ha='left', va='center', fontsize=AXIS_FS, color=LABEL_COLOR,
                 clip_on=False, zorder=6)
     _axis_label_y = ax.text(y_axis_x, Y_LIM_T, "$y$" if MATHTEXT_LABELS else "y",
-                ha='left', va='top', fontsize=AXIS_FS, color=LABEL_COLOR,
+                ha='center', va='bottom', fontsize=AXIS_FS, color=LABEL_COLOR,
                 clip_on=False, zorder=6)
-    # Домашние смещения (в пунктах) от концов стрелок.
-    _axis_home_offsets = {'x': (-5.0, 4.0), 'y': (5.0, -4.0)}
+    # Смещения (в пунктах) от концов стрелок.
+    _axis_home_offsets = {'x': (3.0, 0.0), 'y': (0.0, 2.0)}
 
     # ── Деления на осях ─────────────────────────
     def make_ticks(lim_lo, lim_hi, step):

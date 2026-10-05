@@ -306,7 +306,7 @@ ENGINE_STRINGS_HE = {
     "Label color": "צבע התווית", "Edit text": "ערוך טקסט", "Text color...": "צבע טקסט...",
     "Text size": "גודל טקסט", "Reset rotation": "אפס סיבוב", "Delete": "מחק",
     "Add label here": "הוסף תווית כאן", '"{key}" label color...': 'צבע תווית "{key}"...',
-    "Label size": "גודל תווית", "Reset position": "אפס מיקום",
+    "Label size": "גודל תווית",
 }
 
 # Сообщения об ошибках формулы (редактор + движок)
@@ -418,7 +418,7 @@ ENGINE_STRINGS_RU = {
     "Label color": "Цвет подписи", "Edit text": "Изменить текст", "Text color...": "Цвет текста...",
     "Text size": "Размер текста", "Reset rotation": "Сбросить поворот", "Delete": "Удалить",
     "Add label here": "Добавить подпись здесь", '"{key}" label color...': 'Цвет подписи "{key}"...',
-    "Label size": "Размер подписи", "Reset position": "Сбросить положение",
+    "Label size": "Размер подписи",
 }
 
 ERRORS_RU = {
@@ -1252,15 +1252,28 @@ class FramePreview:
         self.photo = None
         self.label = None
         self.size = (0, 0)
+        self.box = (0, 0, 0, 0)  # область построения в пикселях холста (x0, y0, x1, y1)
 
     def snapshot(self):
-        """Снимок текущего кадра; False, если буфер недоступен."""
+        """Снимок текущего кадра; False, если буфер недоступен. Запоминает и
+        прямоугольник области построения: поля с названиями осей при
+        пане/зуме остаются на месте, двигается только содержимое."""
         try:
             from PIL import Image
             import numpy as np
             buf = np.asarray(self.canvas.buffer_rgba())
             self.base = Image.fromarray(buf, "RGBA").convert("RGB")
             self.size = self.base.size
+            W, H = self.size
+            box = None
+            try:
+                box = fv.plot_box_px(self.canvas.figure)
+            except Exception:
+                box = None
+            if box and box[2] > box[0] and box[3] > box[1]:
+                self.box = (max(0, box[0]), max(0, box[1]), min(W, box[2]), min(H, box[3]))
+            else:
+                self.box = (0, 0, W, H)
             return True
         except Exception:
             self.base = None
@@ -1285,41 +1298,49 @@ class FramePreview:
             self.hide()
 
     def show_shift(self, dx, dy):
-        """Пан: снимок, сдвинутый на (dx, dy) пикселей (y вниз), на белом фоне
-        во всю площадь холста — старый кадр из-под него не выглядывает."""
+        """Пан: содержимое области построения, сдвинутое на (dx, dy) пикселей
+        (y вниз), на белом фоне внутри области; поля и названия осей — на месте."""
         if self.base is None:
             return
         try:
             from PIL import Image
-            W, H = self.size
-            img = Image.new("RGB", (W, H), "white")
-            img.paste(self.base, (int(round(dx)), int(round(dy))))
+            x0, y0, x1, y1 = self.box
+            region = Image.new("RGB", (x1 - x0, y1 - y0), "white")
+            region.paste(self.base.crop(self.box), (int(round(dx)), int(round(dy))))
+            img = self.base.copy()
+            img.paste(region, (x0, y0))
             self._show(img, 0, 0)
         except Exception:
             self._show(self.base, dx, dy)
 
     def show_zoom(self, px, py, scale):
         """
-        Зум: snapshot, масштабированный в 1/scale раз вокруг точки (px, py)
-        (scale < 1 — приближение). Для приближения вырезаем область и
-        растягиваем, для отдаления — сжимаем и кладём на белый фон.
+        Зум: содержимое области построения, масштабированное в 1/scale раз
+        вокруг точки (px, py) холста (scale < 1 — приближение). Для
+        приближения вырезаем часть и растягиваем, для отдаления — сжимаем и
+        кладём на белый фон. Поля и названия осей не трогаем.
         """
         if self.base is None:
             return
         try:
             from PIL import Image
-            W, H = self.size
             if scale <= 0:
                 return
+            x0, y0, x1, y1 = self.box
+            W, H = x1 - x0, y1 - y0
+            base = self.base.crop(self.box)
+            qx, qy = px - x0, py - y0
             if scale < 1.0:
-                box = (px - px * scale, py - py * scale,
-                       px + (W - px) * scale, py + (H - py) * scale)
-                img = self.base.crop(tuple(int(round(v)) for v in box)).resize((W, H), Image.BILINEAR)
+                box = (qx - qx * scale, qy - qy * scale,
+                       qx + (W - qx) * scale, qy + (H - qy) * scale)
+                region = base.crop(tuple(int(round(v)) for v in box)).resize((W, H), Image.BILINEAR)
             else:
                 w2, h2 = max(1, int(round(W / scale))), max(1, int(round(H / scale)))
-                small = self.base.resize((w2, h2), Image.BILINEAR)
-                img = Image.new("RGB", (W, H), "white")
-                img.paste(small, (int(round(px - px / scale)), int(round(py - py / scale))))
+                small = base.resize((w2, h2), Image.BILINEAR)
+                region = Image.new("RGB", (W, H), "white")
+                region.paste(small, (int(round(qx - qx / scale)), int(round(qy - qy / scale))))
+            img = self.base.copy()
+            img.paste(region, (x0, y0))
             self._show(img, 0, 0)
         except Exception:
             self.hide()
@@ -2363,11 +2384,7 @@ class App(tk.Tk):
                 st.update({'dx': 0.0, 'dy': 0.0, 'color': None, 'fontsize': None})
                 src = al.get(key)
                 if isinstance(src, dict):
-                    try:
-                        st['dx'] = float(src.get('dx', 0.0) or 0.0)
-                        st['dy'] = float(src.get('dy', 0.0) or 0.0)
-                    except Exception:
-                        pass
+                    # dx/dy старых проектов игнорируем: подписи осей больше не перетаскиваются
                     if src.get('color'):
                         st['color'] = str(src['color'])
             fv.reset_annotation_offsets()
