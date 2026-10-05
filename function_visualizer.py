@@ -401,7 +401,8 @@ def _parse_local_dict(with_y=False):
     """
     from sympy import asin, acos, atan, acot, tan, cot, sinh, cosh, tanh
     d = {'e': E, 'pi': pi, 'x': _X_SYM,
-         'nroot': nroot, 'cbrt': lambda b: nroot(b, 3),
+         # **_kw: parse_expr(evaluate=False) передаёт evaluate=… в каждый вызов
+         'nroot': nroot, 'cbrt': lambda b, **_kw: nroot(b, 3),
          'root': nroot,
          'arcsin': asin, 'arccos': acos, 'arctan': atan, 'arctg': atan,
          'arcctg': acot, 'tg': tan, 'ctg': cot, 'sh': sinh, 'ch': cosh,
