@@ -669,6 +669,28 @@ def apply_engine_language():
         pass
 
 
+def _init_ui_scale(root):
+    """
+    UI_SCALE = DPI экрана / 96 (на Windows с DPI-awareness Tk сообщает
+    реальный DPI; при масштабе 150 % получаем 1.5). Переменная окружения
+    FV_UI_SCALE задаёт коэффициент принудительно (и для отладки под Xvfb).
+    Вызывается для каждого корневого окна (выбор языка, главное окно).
+    """
+    global UI_SCALE
+    forced = os.environ.get("FV_UI_SCALE")
+    try:
+        if forced:
+            UI_SCALE = float(forced)
+            # шрифты в пунктах тоже должны вырасти — как сделал бы Tk при реальном DPI
+            root.tk.call('tk', 'scaling', UI_SCALE * 96.0 / 72.0)
+        else:
+            UI_SCALE = root.winfo_fpixels('1i') / 96.0
+    except Exception:
+        UI_SCALE = 1.0
+    UI_SCALE = max(0.75, min(4.0, UI_SCALE))
+    return UI_SCALE
+
+
 def _resource_path(name):
     base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, name)
@@ -1379,23 +1401,7 @@ class App(tk.Tk):
         self.schedule_redraw()
 
     def _init_dpi_scale(self):
-        """
-        UI_SCALE = DPI экрана / 96 (на Windows с DPI-awareness Tk сообщает
-        реальный DPI; при масштабе 150 % получаем 1.5). Переменная окружения
-        FV_UI_SCALE задаёт коэффициент принудительно (и для отладки под Xvfb).
-        """
-        global UI_SCALE
-        forced = os.environ.get("FV_UI_SCALE")
-        try:
-            if forced:
-                UI_SCALE = float(forced)
-                # шрифты в пунктах тоже должны вырасти — как сделал бы Tk при реальном DPI
-                self.tk.call('tk', 'scaling', UI_SCALE * 96.0 / 72.0)
-            else:
-                UI_SCALE = self.winfo_fpixels('1i') / 96.0
-        except Exception:
-            UI_SCALE = 1.0
-        UI_SCALE = max(0.75, min(4.0, UI_SCALE))
+        _init_ui_scale(self)
 
     # ── Ctrl+C/X/V/A независимо от раскладки клавиатуры ─────
     def _setup_clipboard_shortcuts(self):
@@ -2394,11 +2400,97 @@ class App(tk.Tk):
 
 # ═════════════════════════════════════════════════════════════
 
+# ═════════════════════════════════════════════════════════════
+#  ВЫБОР ЯЗЫКА ПРИ ЗАПУСКЕ
+# ═════════════════════════════════════════════════════════════
+
+# (код, название на самом языке, клавиша)
+LANGUAGES = [("en", "English", "1"), ("he", "עברית", "2"), ("ru", "Русский", "3")]
+_CHOOSER_PROMPTS = [("en", "Choose language"), ("he", "בחר שפה"), ("ru", "Выберите язык")]
+
+
+def _lang_font(code, size, bold=False):
+    fam = {"en": UI_FONT, "he": HE_FONT, "ru": RU_FONT}[code]
+    return (fam, size + (1 if code == "he" else 0), "bold") if bold else (fam, size + (1 if code == "he" else 0))
+
+
+class LanguageChooser(tk.Tk):
+    """
+    Стартовое окно: на каком языке открыть программу. Три кнопки — каждая
+    своим шрифтом (Schola / David / Century Schoolbook). Клавиши 1, 2, 3
+    выбирают язык, Esc закрывает программу. Результат — в .choice.
+    """
+
+    def __init__(self):
+        super().__init__()
+        _resolve_ui_font(self)
+        _init_ui_scale(self)
+        self.choice = None
+        self.title("Function Visualizer")
+        self.configure(bg=APP_BG)
+        self.resizable(False, False)
+        try:
+            self.iconbitmap(_resource_path("icon.ico"))
+        except Exception:
+            pass
+
+        outer = tk.Frame(self, bg=BORDER, padx=1, pady=1)
+        outer.pack(padx=_px(18), pady=_px(18))
+        box = tk.Frame(outer, bg=CARD_BG, padx=_px(28), pady=_px(18))
+        box.pack()
+        tk.Label(box, text="Function Visualizer", bg=CARD_BG, fg=TEXT,
+                 font=(UI_FONT, 15, "bold")).pack(pady=(0, _px(2)))
+        tk.Label(box, text="ariadna", bg=CARD_BG, fg=ACCENT,
+                 font=(UI_FONT, 10, "bold")).pack(pady=(0, _px(10)))
+        for code, prompt in _CHOOSER_PROMPTS:
+            tk.Label(box, text=he_display(prompt), bg=CARD_BG, fg=SUBTEXT,
+                     font=_lang_font(code, 9)).pack()
+        tk.Frame(box, bg=BORDER, height=1).pack(fill="x", pady=_px(10))
+        self._buttons = {}
+        for code, name, key in LANGUAGES:
+            b = tk.Button(box, text=he_display(name), font=_lang_font(code, 12, bold=True),
+                          bg=BTN_BLUE, fg="white", activebackground=ACCENT, activeforeground="white",
+                          relief="flat", bd=0, cursor="hand2", width=14, pady=_px(6),
+                          command=lambda c=code: self._pick(c))
+            b.pack(fill="x", pady=_px(3))
+            self._buttons[code] = b
+            self.bind(key, lambda _e, c=code: self._pick(c))
+            self.bind(f"<KP_{key}>", lambda _e, c=code: self._pick(c))
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+        # По центру экрана
+        self.update_idletasks()
+        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        x = max(0, (self.winfo_screenwidth() - w) // 2)
+        y = max(0, (self.winfo_screenheight() - h) // 2 - _px(40))
+        self.geometry(f"+{x}+{y}")
+        self.lift()
+        self.focus_force()
+
+    def _pick(self, code):
+        self.choice = code
+        self.destroy()
+
+
+def choose_language():
+    """Показывает окно выбора языка; возвращает код языка или None (закрыли окно)."""
+    win = LanguageChooser()
+    win.mainloop()
+    return win.choice
+
+
 def main(lang=None):
-    """Точка входа. lang='he' — ивритская версия (см. app_he.py)."""
+    """
+    Точка входа. Без аргумента — сначала окно выбора языка (единый exe);
+    lang='en'/'he'/'ru' — сразу на этом языке (app_he.py, app_ru.py).
+    """
     global LANG
-    if lang:
-        LANG = lang
+    if lang is None:
+        lang = choose_language()
+        if lang is None:
+            return
+    LANG = lang
     app = App()
     app.mainloop()
 
