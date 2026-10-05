@@ -174,10 +174,14 @@ def _resolve_ui_font(root):
 # LANG = "en" — английский интерфейс (панель слева, график справа);
 # LANG = "he" — иврит (app_he.py): панель справа, график слева, ивритский
 # текст шрифтом David (HE_FONT), цифры и латиница — прежним UI_FONT.
-# Смешанные подписи («חיתוך עם X») разбиваются на фрагменты: ивритские
-# фрагменты — David, остальные — UI_FONT; фрагменты раскладываются справа
-# налево. Tk не делает bidi-переупорядочивание: на Windows он зеркалит
-# ивритский фрагмент сам (GDI), на Linux/macOS — зеркалим вручную.
+# Визуальный порядок символов считается по правилам bidi (fv.bidi_visual):
+# двоеточия, тире, многоточия, пробелы и скобки встают на «ивритские» места
+# («:X צעד», «…שמור תמונה», «— f1 / f2»). Смешанные подписи разбиваются на
+# фрагменты визуальной строки: ивритские слова — David, всё остальное
+# (цифры, латиница, знаки) — UI_FONT. Tk на Windows переставляет ивритские
+# буквы сам (GDI, абзац слева направо) — ему отдаём логический порядок слов
+# и строку, которую он нарисует в нужном виде; Tk на Linux/macOS не
+# переставляет ничего — отдаём уже визуальный порядок.
 LANG = "en"
 HE_FONT = "David"
 HE_FONT_FALLBACKS = ["David", "David CLM", "Frank Ruehl CLM", "Noto Serif Hebrew",
@@ -323,33 +327,51 @@ def tr_err(msg):
     return msg
 
 
-def _he_runs(text):
-    """[(фрагмент, иврит?)] в логическом порядке."""
-    runs, pos = [], 0
-    for m in _HEB_RUN_RE.finditer(text):
-        if m.start() > pos:
-            runs.append((text[pos:m.start()], False))
-        runs.append((m.group(0), True))
-        pos = m.end()
-    if pos < len(text):
-        runs.append((text[pos:], False))
-    return runs
+# Ивритские фрагменты визуальной строки: буквы иврита и пробелы между словами.
+# Знаки препинания, цифры и латиница в них не входят — они идут шрифтом UI_FONT.
+_HEB_WORDS_RE = re.compile(r'[\u0590-\u05FF]+(?: +[\u0590-\u05FF]+)*')
 
-
-def _display_run(run, is_heb):
-    # Windows: GDI зеркалит ивритский фрагмент сам; иначе делаем это вручную
-    if is_heb and sys.platform != "win32":
-        return run[::-1]
-    return run
+# Tk на Windows (GDI) переставляет RTL-текст сам, но считает абзац направленным
+# слева направо; Tk на Linux/macOS и matplotlib не переставляют ничего.
+_TK_DOES_BIDI = sys.platform == "win32"
 
 
 def he_display(text):
-    """Чисто ивритская строка (кнопка, пункт меню, заголовок окна) → как показывать."""
+    """
+    Строка для одиночного виджета/диалога (кнопка, заголовок окна, пункт меню,
+    messagebox): визуальный порядок по правилам bidi для ивритского абзаца.
+    На Windows возвращается строка, которую GDI (абзац слева направо) нарисует
+    именно в этом визуальном порядке: bidi_visual(V, 'L') — обратное
+    преобразование, т. к. перестановка отрезков одного уровня — инволюция.
+    """
     if not has_heb(text):
         return text
-    if sys.platform == "win32":
-        return text
-    return ''.join(_display_run(r, h) for r, h in reversed(_he_runs(text)))
+    v = fv.bidi_visual(text, 'R')
+    return fv.bidi_visual(v, 'L') if _TK_DOES_BIDI else v
+
+
+def _visual_runs(text):
+    """[(фрагмент, иврит?)] визуальной строки слева направо."""
+    v = fv.bidi_visual(text, 'R')
+    runs, pos = [], 0
+    for m in _HEB_WORDS_RE.finditer(v):
+        if m.start() > pos:
+            runs.append((v[pos:m.start()], False))
+        runs.append((m.group(0), True))
+        pos = m.end()
+    if pos < len(v):
+        runs.append((v[pos:], False))
+    return runs
+
+
+def _widget_text(run, is_heb):
+    """Текст для отдельного виджета: ивритский фрагмент на Windows отдаём в
+    логическом порядке (GDI зеркалит его сам), иначе — уже визуальный."""
+    if is_heb and _TK_DOES_BIDI:
+        return run[::-1]
+    if not is_heb and not run.strip():
+        return run.replace(" ", "\u00a0")       # пробел между фрагментами
+    return run
 
 
 def ui_font(text, size, bold=False, italic=False):
@@ -382,15 +404,47 @@ def make_label(parent, text, size=9, color=SUBTEXT, bold=False, bg=None, **kw):
     bg = bg or (parent.cget("bg") if hasattr(parent, "cget") else CARD_BG)
     text = T(text)
     if not (RTL() and has_heb(text)):
+        if RTL():
+            # Подпись без иврита в ивритском интерфейсе («f1:» → «:f1»): знаки
+            # по краям берут направление абзаца; без RTL-символов GDI ничего не
+            # переставляет, так что строка одинакова для Windows и Linux.
+            text = fv.bidi_visual(text, 'R')
         return tk.Label(parent, text=text, bg=bg, fg=color, font=ui_font(text, size, bold), **kw)
     box = tk.Frame(parent, bg=bg)
-    for run, is_heb in _he_runs(text):
-        if not run.strip() and not is_heb:
-            run = run.replace(" ", "\u00a0")       # пробел между фрагментами
-        tk.Label(box, text=_display_run(run, is_heb), bg=bg, fg=color,
-                 font=(HE_FONT if is_heb else UI_FONT, size + (1 if is_heb else 0),
-                       "bold") if bold else (HE_FONT if is_heb else UI_FONT, size + (1 if is_heb else 0)),
-                 padx=0, bd=0).pack(side="right")
+    for run, is_heb in _visual_runs(text):          # уже слева направо
+        fam, sz = (HE_FONT, size + 1) if is_heb else (UI_FONT, size)
+        tk.Label(box, text=_widget_text(run, is_heb), bg=bg, fg=color,
+                 font=(fam, sz, "bold") if bold else (fam, sz),
+                 padx=0, bd=0).pack(side="left")
+    return box
+
+
+def make_paragraph(parent, text, size=8, color=SUBTEXT, bg=None, width_px=300):
+    """
+    Многострочная подсказка. В английском режиме — Label с wraplength.
+    В иврите переносим строки сами (bidi работает построчно) и каждую
+    строку собираем через make_label, прижимая к правому краю.
+    """
+    bg = bg or parent.cget("bg")
+    text = T(text)
+    if not (RTL() and has_heb(text)):
+        return tk.Label(parent, text=text, bg=bg, fg=color, font=ui_font(text, size),
+                        wraplength=width_px, justify="left", anchor="w")
+    import tkinter.font as tkfont
+    f = tkfont.Font(family=HE_FONT, size=size + 1)
+    lines, cur = [], ""
+    for word in text.split(" "):
+        cand = f"{cur} {word}" if cur else word
+        if cur and f.measure(cand) > width_px:
+            lines.append(cur)
+            cur = word
+        else:
+            cur = cand
+    if cur:
+        lines.append(cur)
+    box = tk.Frame(parent, bg=bg)
+    for ln in lines:
+        make_label(box, ln, size=size, color=color, bg=bg).pack(anchor="e")
     return box
 
 
@@ -423,10 +477,12 @@ def apply_engine_language():
         fv.UI_TRANSLATIONS = dict(ENGINE_STRINGS_HE)
         fv.EXTRA_FONT_FAMILIES = [HE_FONT, "DejaVu Sans"]
         fv.BIDI_SIMPLE = True
+        fv.UI_DISPLAY = he_display
     else:
         fv.UI_TRANSLATIONS = {}
         fv.EXTRA_FONT_FAMILIES = []
         fv.BIDI_SIMPLE = False
+        fv.UI_DISPLAY = None
     try:
         fv.apply_font_preset()
     except Exception:
@@ -743,8 +799,8 @@ class FuncRow:
         tk.Button(self.frame2, text="▲", command=lambda: self._lw_step(+1), **btn_f).pack(side=S, padx=(0, 4))
 
         # Тип линии (подписи пунктов — на языке интерфейса)
-        self._style_names = {T(k): v for k, v in self.LINESTYLES.items()}
-        self.linestyle_var = tk.StringVar(value=T(list(self.LINESTYLES.keys())[0]))
+        self._style_names = {he_display(T(k)): v for k, v in self.LINESTYLES.items()}
+        self.linestyle_var = tk.StringVar(value=he_display(T(list(self.LINESTYLES.keys())[0])))
         self.linestyle_var.trace_add("write", lambda *_: on_change())
         om = tk.OptionMenu(self.frame2, self.linestyle_var, *self._style_names.keys())
         om.config(bg=ENTRY_BG, fg=TEXT, activebackground=CARD_BG, activeforeground=TEXT,
@@ -769,7 +825,8 @@ class FuncRow:
         self.on_change()
 
     def _pick_color(self):
-        result = colorchooser.askcolor(color=self.color, title=T("Pick color for f{idx}", idx=self.idx))
+        result = colorchooser.askcolor(color=self.color,
+                                       title=he_display(T("Pick color for f{idx}", idx=self.idx)))
         if result and result[1]:
             self.set_color(result[1])
             self.on_change()
@@ -893,7 +950,7 @@ class FillRow:
         self.x_to = live_entry(self.frame, 6, "3", on_change); self.x_to.pack(side=S)
 
         lbl("style:")
-        self._style_names = [T(x) for x in self.STYLES]
+        self._style_names = [he_display(T(x)) for x in self.STYLES]
         self.style_var = tk.StringVar(value=self._style_names[0])
         self.style_var.trace_add("write", lambda *_: on_change())
         om = tk.OptionMenu(self.frame, self.style_var, *self._style_names)
@@ -1394,11 +1451,9 @@ class App(tk.Tk):
         hint = T("Double-click empty space on the graph to add a label. "
                  "Drag to move, scroll to rotate, right-click for options. "
                  "Point labels can be dragged too.")
-        tk.Label(labels_card, text=he_display(hint) if not has_heb(hint) or sys.platform == "win32"
-                 else hint[::-1],
-                 bg=CARD_BG, fg=SUBTEXT, font=ui_font(hint, 8),
-                 wraplength=_px(LEFT_PANEL_WIDTH - 60), justify="right" if RTL() else "left",
-                 anchor=anchor_start()).pack(anchor=anchor_start(), fill="x", padx=10, pady=(0, 6))
+        make_paragraph(labels_card, hint, size=8, color=SUBTEXT, bg=CARD_BG,
+                       width_px=_px(LEFT_PANEL_WIDTH - 60)).pack(anchor=anchor_start(), fill="x",
+                                                                 padx=10, pady=(0, 6))
         bl = tk.Frame(labels_card, bg=CARD_BG)
         bl.pack(anchor=anchor_start(), padx=10, pady=(0, 8))
         small_button(bl, "Clear all labels", self._clear_labels).pack(side=side())
@@ -1435,6 +1490,12 @@ class App(tk.Tk):
         # matplotlib (он подгоняет размер фигуры под виджет) — иначе при
         # увеличении окна фигура остаётся прежней и справа/снизу белое поле.
         w.bind("<Configure>", self._on_canvas_resize, add="+")
+        # Запрашиваемый размер холста держим маленьким: бэкенд при показе
+        # (<Map>) выставляет его равным фигуре (7×7 дюймов ≈ 700+ px), и pack
+        # в невысоком окне выдавливает строку состояния за край. Реальный
+        # размер задаёт expand=True, фигура подгоняется под него.
+        w.bind("<Map>", lambda _e: w.after_idle(self._shrink_canvas_request), add="+")
+        self._shrink_canvas_request()
         self._preview = FramePreview(self.canvas)
 
         # Строка состояния. В иврите текст собирается из фрагментов
@@ -1578,7 +1639,7 @@ class App(tk.Tk):
                     funcs.append(r.get())
                     r.editor.set_error(None)
                 except IncompleteExpression as ex:
-                    r.editor.set_error(tr_err(str(ex)))
+                    r.editor.set_error(he_display(tr_err(str(ex))))
                     self._incomplete_rows += 1
                     funcs.append("")
             colors.append(r.get_color())
@@ -1670,7 +1731,7 @@ class App(tk.Tk):
             errors = result.get('errors', {}) or {}
             for idx, r in enumerate(self.func_rows):
                 if idx in errors and not r.is_empty():
-                    r.editor.set_error(tr_err(errors[idx]))
+                    r.editor.set_error(he_display(tr_err(errors[idx])))
             # Синхронная отрисовка: новый кадр готов сразу, и предпросмотр
             # (сдвинутый/масштабированный старый кадр) можно убрать без «моргания».
             try:
@@ -1802,7 +1863,17 @@ class App(tk.Tk):
 
         self._poll_job = self.after(150, self._poll_worker)
 
+    def _shrink_canvas_request(self):
+        try:
+            w = self.canvas.get_tk_widget()
+            small = (_px(320), _px(240))
+            if (w.winfo_reqwidth(), w.winfo_reqheight()) != small:
+                w.configure(width=small[0], height=small[1])
+        except Exception:
+            pass
+
     def _on_canvas_resize(self, _event):
+        self._shrink_canvas_request()
         # Пересчитать поля фигуры под новый размер (с задержкой)
         if self._tl_job is not None:
             try:

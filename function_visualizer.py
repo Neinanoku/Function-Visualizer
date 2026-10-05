@@ -77,28 +77,146 @@ FONT_PRESETS = {
 UI_TRANSLATIONS = {}
 EXTRA_FONT_FAMILIES = []
 BIDI_SIMPLE = False
+# Приложение может положить сюда функцию «строка → как показывать» (для
+# ивритской версии: визуальный порядок под Tk/Windows); tr() применяет её
+# к переведённым подписям меню и диалогов.
+UI_DISPLAY = None
 _HEB_RUN_RE = re.compile(r'[\u0590-\u05FF][\u0590-\u05FF\s]*[\u0590-\u05FF]|[\u0590-\u05FF]')
 
 
-def tr(text):
-    return UI_TRANSLATIONS.get(text, text)
+def tr(text, **fmt):
+    out = UI_TRANSLATIONS.get(text, text)
+    if fmt:
+        out = out.format(**fmt)
+    return UI_DISPLAY(out) if UI_DISPLAY else out
+
+
+# ── Упрощённый алгоритм Unicode Bidi (UAX#9) ───────────────────────────────
+# matplotlib и Tk на Linux вообще не переставляют RTL-текст, а Tk на Windows
+# (GDI) переставляет его, считая абзац направленным слева направо. Поэтому
+# визуальный порядок символов считаем сами: правила W1–W7 (числа), N1–N2
+# (нейтральные знаки — пробелы, двоеточия, тире, многоточия, скобки берут
+# направление окружения или абзаца), уровни, перестановка L2, зеркальные
+# скобки. Явные вложения (LRE/RLE/…) и маркеры направления удаляются.
+import unicodedata as _ud
+
+_BIDI_MIRROR = {'(': ')', ')': '(', '[': ']', ']': '[', '{': '}', '}': '{', '<': '>', '>': '<',
+                '«': '»', '»': '«', '‹': '›', '›': '‹', '⟨': '⟩', '⟩': '⟨', '≤': '≥', '≥': '≤'}
+_BIDI_STRIP = {'LRE', 'RLE', 'PDF', 'LRO', 'RLO', 'LRI', 'RLI', 'FSI', 'PDI', 'BN'}
+_BIDI_STRIP_CHARS = {'\u200e', '\u200f', '\u061c'}
+_BIDI_NI = {'B', 'S', 'WS', 'ON'}
+
+
+def _bidi_class(c):
+    b = _ud.bidirectional(c) or 'ON'
+    if b == 'AL':
+        return 'R'
+    if b == 'AN':
+        return 'EN'
+    return b
+
+
+def bidi_visual(text, base='R'):
+    """
+    Строка в визуальном порядке (слева направо) для абзаца с направлением
+    base: 'R' — иврит (по умолчанию), 'L' — латиница. Многострочный текст
+    обрабатывается построчно. Для строки без RTL-символов при base='L'
+    возвращается она же.
+    """
+    if not text:
+        return text
+    if '\n' in text:
+        return '\n'.join(bidi_visual(line, base) for line in text.split('\n'))
+    chars = [c for c in text if c not in _BIDI_STRIP_CHARS and _ud.bidirectional(c) not in _BIDI_STRIP]
+    if not chars:
+        return ''
+    n = len(chars)
+    cls = [_bidi_class(c) for c in chars]
+    # W1: диакритика наследует класс предыдущего символа
+    for i in range(n):
+        if cls[i] == 'NSM':
+            cls[i] = cls[i - 1] if i else base
+    # W4: одиночный разделитель между двумя цифрами — часть числа (1.5, 1:2)
+    for i in range(1, n - 1):
+        if cls[i] in ('ES', 'CS') and cls[i - 1] == 'EN' and cls[i + 1] == 'EN':
+            cls[i] = 'EN'
+    # W5: терминаторы (%, °, $) рядом с числом — часть числа
+    i = 0
+    while i < n:
+        if cls[i] == 'ET':
+            j = i
+            while j < n and cls[j] == 'ET':
+                j += 1
+            if (i > 0 and cls[i - 1] == 'EN') or (j < n and cls[j] == 'EN'):
+                for k in range(i, j):
+                    cls[k] = 'EN'
+            i = j
+        else:
+            i += 1
+    # W6: оставшиеся разделители — нейтральные
+    for i in range(n):
+        if cls[i] in ('ES', 'ET', 'CS'):
+            cls[i] = 'ON'
+    # W7: число после латиницы ведёт себя как латиница
+    last_strong = base
+    for i in range(n):
+        if cls[i] in ('L', 'R'):
+            last_strong = cls[i]
+        elif cls[i] == 'EN' and last_strong == 'L':
+            cls[i] = 'L'
+    # N1/N2: нейтральные между одинаковыми направлениями берут его, иначе — направление абзаца
+    def strong(c):
+        return 'R' if c == 'EN' else c
+    i = 0
+    while i < n:
+        if cls[i] in _BIDI_NI:
+            j = i
+            while j < n and cls[j] in _BIDI_NI:
+                j += 1
+            before = strong(cls[i - 1]) if i > 0 else base
+            after = strong(cls[j]) if j < n else base
+            d = before if before == after else base
+            for k in range(i, j):
+                cls[k] = d
+            i = j
+        else:
+            i += 1
+    # Уровни (I1/I2)
+    e = 1 if base == 'R' else 0
+    lev = []
+    for c in cls:
+        if e == 0:
+            lev.append(0 if c == 'L' else 1 if c == 'R' else 2)
+        else:
+            lev.append(1 if c == 'R' else 2)
+    # Зеркальные скобки на нечётных уровнях
+    for i in range(n):
+        if lev[i] % 2 == 1:
+            chars[i] = _BIDI_MIRROR.get(chars[i], chars[i])
+    # L2: от наибольшего уровня до наименьшего нечётного переворачиваем отрезки
+    odd = [l for l in lev if l % 2 == 1]
+    if odd:
+        for k in range(max(lev), min(odd) - 1, -1):
+            i = 0
+            while i < n:
+                if lev[i] >= k:
+                    j = i
+                    while j < n and lev[j] >= k:
+                        j += 1
+                    chars[i:j] = chars[i:j][::-1]
+                    lev[i:j] = lev[i:j][::-1]
+                    i = j
+                else:
+                    i += 1
+    return ''.join(chars)
 
 
 def bidi_display(text):
-    """Визуальный порядок для строки с ивритом: ивритские фрагменты зеркалятся,
-    порядок фрагментов обращается (для чисто ивритской строки — просто reverse)."""
+    """Визуальный порядок для свободной подписи с ивритом (matplotlib не
+    переставляет RTL-текст сам); без BIDI_SIMPLE или без иврита — как есть."""
     if not text or not BIDI_SIMPLE or not _HEB_RUN_RE.search(text):
         return text
-    parts = []
-    pos = 0
-    for m in _HEB_RUN_RE.finditer(text):
-        if m.start() > pos:
-            parts.append(text[pos:m.start()])
-        parts.append(m.group(0)[::-1])
-        pos = m.end()
-    if pos < len(text):
-        parts.append(text[pos:])
-    return ''.join(reversed(parts))
+    return bidi_visual(text, 'R')
 
 
 def _font_available(name):
@@ -2655,7 +2773,7 @@ class AxisLabelManager:
         if root is None or event.guiEvent is None:
             return
         menu = tk.Menu(root, tearoff=0)
-        menu.add_command(label=tr('"{key}" label color...').replace("{key}", key),
+        menu.add_command(label=tr('"{key}" label color...', key=key),
                           command=lambda: self._set_color(key))
         sub = tk.Menu(menu, tearoff=0)
         for size in (8, 10, 12, 14, 16, 20, 24, 28):
