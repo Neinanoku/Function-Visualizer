@@ -2,18 +2,45 @@
 Умный визуализатор функций
 Зависимости: matplotlib, numpy, sympy, scipy
 Установка: pip install matplotlib numpy sympy scipy
+
+Движок построения графика. Используется двумя способами:
+  • standalone — `python function_visualizer.py` (plot_function() без аргументов
+    открывает окно matplotlib);
+  • из GUI (app.py) — plot_function(fig) рисует в переданную Figure, которая
+    встроена в окно Tk (FigureCanvasTkAgg) и перерисовывается «вживую».
+
+Тяжёлые символьные вычисления sympy (singularities / limit / solveset /
+simplify) проходят через кэш sym_cached(). В режиме SYMBOLIC_MODE='cached'
+(GUI) незакэшированный запрос НЕ считается на месте, а откладывается
+(SymbolicPending) — график строится сразу по численным методам, а GUI
+досчитывает отложенные задания в фоновом потоке (run_jobs) и перерисовывает.
 """
+
+import logging
+import math
+import threading
 
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
-import math
 from sympy import (
     sympify, symbols, lambdify, diff, limit, oo, nan, zoo,
-    im, re, singularities, solve, pi, I, Rational, Float
+    singularities, solveset, pi, E, Rational, Integer, S, Abs, sign,
+    log, exp, nsimplify, simplify, count_ops, expand_log, Function,
+    Add, Mul, Pow,
 )
+from sympy.sets.sets import FiniteSet, Union, Complement, Intersection
+from sympy.sets.fancysets import ImageSet
+from sympy.sets.conditionset import ConditionSet
 from scipy.signal import argrelextrema
-from scipy.optimize import brentq
+from scipy.optimize import brentq, minimize_scalar
+
+# Шрифт графика: список с запасными вариантами (Calibri есть только на
+# Windows; Carlito — его метрический аналог в Linux; DejaVu Sans — везде).
+# matplotlib принимает список семейств и берёт первый доступный.
+plt.rcParams['font.family'] = ['Calibri', 'Carlito', 'DejaVu Sans', 'sans-serif']
+# Не засорять консоль предупреждениями «findfont: Font family not found».
+logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
 
 # ──────────────────────────────────────────────
 #  ПАРАМЕТРЫ — меняй только эту секцию
@@ -69,7 +96,6 @@ FILL = [
 # ──────────────────────────────────────────────
 #  КОД — не трогай ниже этой строки
 # ──────────────────────────────────────────────
-
 def _preprocess_func_str(s):
     """
     Преобразует удобные пользователю записи логарифмов в форму sympy:
@@ -181,33 +207,279 @@ def _parse_equation_input(s):
     return ('implicit', (left.strip(), right))
 
 
-def build_numpy_func(func_str):
+
+# ══════════════════════════════════════════════════════════════
+#  КЭШ СИМВОЛЬНЫХ ВЫЧИСЛЕНИЙ И ОТЛОЖЕННЫЕ ЗАДАНИЯ
+# ══════════════════════════════════════════════════════════════
+
+# 'compute' — считать всё сразу (standalone, тесты);
+# 'cached'  — поток GUI: незакэшированные символьные запросы откладываются,
+#             график строится численно, задания досчитывает run_jobs().
+SYMBOLIC_MODE = 'compute'
+
+
+class SymbolicPending(Exception):
+    """Символьный результат ещё не вычислен (отложен в очередь заданий)."""
+
+
+_SYM_CACHE = {}          # key -> (ok: bool, value | exception)
+_PENDING = {}            # key -> fn   (dict — дедупликация по ключу, порядок сохраняется)
+_SYM_LOCK = threading.Lock()
+_SYM_TLS = threading.local()        # force_compute=True внутри run_jobs
+_DRAW_STATE = {'pending': False}    # было ли что-то отложено в текущем построении
+
+
+def sym_cached(key, fn):
+    """
+    Возвращает закэшированный результат fn() по ключу key (хэшируемый кортеж
+    строк). Если результата нет:
+      • режим 'compute' (или вызов из run_jobs) — считает, кэширует
+        (значение ИЛИ исключение) и возвращает / бросает;
+      • режим 'cached' — ставит (key, fn) в очередь и бросает SymbolicPending.
+    Исключение sympy (NotImplementedError и т.п.) тоже кэшируется, чтобы не
+    повторять заведомо провальный расчёт при каждой перерисовке.
+    """
+    with _SYM_LOCK:
+        hit = _SYM_CACHE.get(key)
+    if hit is not None:
+        ok, payload = hit
+        if ok:
+            return payload
+        raise payload
+    force = getattr(_SYM_TLS, 'force_compute', False)
+    if SYMBOLIC_MODE == 'cached' and not force:
+        with _SYM_LOCK:
+            _PENDING.setdefault(key, fn)
+            _DRAW_STATE['pending'] = True
+        raise SymbolicPending(key)
+    return _compute_job(key, fn)
+
+
+def _compute_job(key, fn):
+    try:
+        val = fn()
+    except SymbolicPending:
+        raise
+    except Exception as exc:
+        with _SYM_LOCK:
+            _SYM_CACHE[key] = (False, exc)
+        raise
+    with _SYM_LOCK:
+        _SYM_CACHE[key] = (True, val)
+    return val
+
+
+def take_pending_jobs():
+    """Забирает (и очищает) очередь отложенных заданий: список (key, fn)."""
+    with _SYM_LOCK:
+        jobs = list(_PENDING.items())
+        _PENDING.clear()
+    return jobs
+
+
+def run_jobs(jobs):
+    """
+    Выполняет задания (key, fn) с семантикой sym_cached. Безопасно вызывать из
+    рабочего потока: внутри принудительно включён режим вычисления, поэтому
+    вложенные sym_cached() тоже считаются, а не откладываются снова.
+    """
+    prev = getattr(_SYM_TLS, 'force_compute', False)
+    _SYM_TLS.force_compute = True
+    try:
+        for key, fn in jobs:
+            with _SYM_LOCK:
+                if key in _SYM_CACHE:
+                    continue
+            try:
+                _compute_job(key, fn)
+            except Exception:
+                pass
+    finally:
+        _SYM_TLS.force_compute = prev
+
+
+def clear_symbolic_cache():
+    with _SYM_LOCK:
+        _SYM_CACHE.clear()
+        _PENDING.clear()
+    _NUMPY_FUNC_CACHE.clear()
+    _IMPLICIT_FUNC_CACHE.clear()
+    _ENUM_CACHE.clear()
+
+
+# ══════════════════════════════════════════════════════════════
+#  РАЗБОР ВЫРАЖЕНИЙ И ЧИСЛЕННЫЕ ФУНКЦИИ
+# ══════════════════════════════════════════════════════════════
+
+_X_SYM, _Y_SYM = symbols('x y')
+
+
+class nroot(Function):
+    """
+    Корень n-й степени nroot(b, n) с вещественным значением для отрицательных
+    b при нечётном n (как ∛(−8) = −2). Для чётного n — обычная степень 1/n;
+    для нецелого n остаётся невычисленным (считается численно, см. _np_nroot).
+    """
+    nargs = 2
+
+    @classmethod
+    def eval(cls, b, n):
+        if n.is_Integer and n > 0:
+            if n.is_odd:
+                return sign(b) * Abs(b) ** Rational(1, n)
+            return b ** Rational(1, n)
+        return None
+
+
+def _np_nroot(b, n):
+    b = np.asarray(b, dtype=float)
+    n = np.asarray(n, dtype=float)
+    with np.errstate(all='ignore'):
+        odd = np.mod(n, 2) == 1
+        return np.where(odd,
+                        np.sign(b) * np.power(np.abs(b), 1.0 / n),
+                        np.power(b, 1.0 / n))
+
+
+def _np_cot(t):
+    return 1.0 / np.tan(t)
+
+
+def _np_sec(t):
+    return 1.0 / np.cos(t)
+
+
+def _np_csc(t):
+    return 1.0 / np.sin(t)
+
+
+def _np_acot(t):
+    return np.arctan(1.0 / t)
+
+
+# Модули для lambdify: явные numpy-реализации + всё остальное из numpy.
+_LAMBDIFY_MODULES = [
+    {'sqrt': np.sqrt, 'log': np.log, 'ln': np.log,
+     'exp': np.exp, 'sin': np.sin, 'cos': np.cos,
+     'tan': np.tan, 'abs': np.abs, 'Abs': np.abs, 'pi': np.pi,
+     'asin': np.arcsin, 'acos': np.arccos, 'atan': np.arctan,
+     'cot': _np_cot, 'sec': _np_sec, 'csc': _np_csc, 'acot': _np_acot,
+     'sign': np.sign, 'nroot': _np_nroot, 'cbrt': np.cbrt},
+    'numpy',
+]
+
+
+def _parse_transformations():
     from sympy.parsing.sympy_parser import (
-        parse_expr, standard_transformations,
-        implicit_multiplication_application, convert_xor)
-    from sympy import E as _E, pi as _pi
-    func_str = _preprocess_func_str(func_str)
-    x = symbols('x')
+        standard_transformations, implicit_multiplication_application,
+        convert_xor)
+    # Неявное умножение (2x, ex, 2pi) и ^ как степень.
+    return standard_transformations + (implicit_multiplication_application,
+                                       convert_xor)
 
-    # Те же преобразования, что и в parse_number: неявное умножение (2x, ex,
-    # 2pi) и ^ как степень. local_dict делает 'e' числом Эйлера, 'pi' — π,
-    # 'x' — переменной. Без этого 'e' считался свободным символом и
-    # 'e*x-e' не вычислялся (пустой график + долгое раздумье).
-    transformations = (standard_transformations +
-                       (implicit_multiplication_application, convert_xor))
-    local_dict = {'e': _E, 'pi': _pi, 'x': x}
 
-    expr_raw = parse_expr(func_str, evaluate=False,
+def _parse_local_dict(with_y=False):
+    """
+    Словарь имён для parse_expr: 'e' — число Эйлера, 'pi' — π, 'x' (и 'y') —
+    переменные; дополнительные имена функций (русские tg/ctg, arc-формы,
+    nroot/cbrt/root).
+    """
+    from sympy import asin, acos, atan, acot, tan, cot, sinh, cosh, tanh
+    d = {'e': E, 'pi': pi, 'x': _X_SYM,
+         'nroot': nroot, 'cbrt': lambda b: nroot(b, 3),
+         'root': nroot,
+         'arcsin': asin, 'arccos': acos, 'arctan': atan, 'arctg': atan,
+         'arcctg': acot, 'tg': tan, 'ctg': cot, 'sh': sinh, 'ch': cosh,
+         'th': tanh, 'sgn': sign}
+    if with_y:
+        d['y'] = _Y_SYM
+    return d
+
+
+def parse_exact(text):
+    """
+    Разбирает пользовательский текст константы (например 'x = 2pi' → '2pi')
+    в ТОЧНОЕ выражение sympy без свободных символов (2π, √2/2, e, 3/4 …).
+    Возвращает None, если разобрать не удалось или остались переменные.
+    """
+    if text is None:
+        return None
+    t = str(text).strip().lower().replace('π', 'pi').replace('∞', 'oo')
+    if not t:
+        return None
+    try:
+        from sympy.parsing.sympy_parser import parse_expr
+        expr = parse_expr(_preprocess_func_str(t),
+                          transformations=_parse_transformations(),
+                          local_dict=_parse_local_dict())
+        expr = sympify(expr)
+        if expr.free_symbols:
+            return None
+        if expr.has(oo, -oo, zoo, nan):
+            return None
+        return expr
+    except Exception:
+        return None
+
+
+def _unknown_names_msg(src, extra_symbols, local_dict):
+    """
+    Сообщение «unknown name: …». Неявное умножение режет незнакомое слово
+    на буквы (foo → f·o·o), поэтому ищем в исходной строке целые
+    идентификаторы, которых нет среди известных имён sympy / local_dict.
+    """
+    import re as _re
+    import sympy as _sp
+    known = set(local_dict) | {'x', 'y', 'e', 'pi', 'oo', 'inf', 'lg', 'log2', 'log10'}
+    bad = []
+    for ident in _re.findall(r'[A-Za-z_][A-Za-z_0-9]*', str(src)):
+        low = ident.lower()
+        if low in known or ident in known:
+            continue
+        if hasattr(_sp, ident) or hasattr(_sp, low):
+            continue
+        if ident not in bad:
+            bad.append(ident)
+    if not bad:
+        bad = sorted(str(s) for s in extra_symbols)
+    return "unknown name: " + ', '.join(bad)
+
+
+_NUMPY_FUNC_CACHE = {}      # func_str -> (expr, expr_raw, f)
+_IMPLICIT_FUNC_CACHE = {}   # (lhs, rhs) -> (H, h)
+_FUNC_CACHE_LIMIT = 256
+
+
+def build_numpy_func(func_str):
+    """
+    Строит (expr, expr_raw, f) для строки функции: sympy-выражение,
+    его невычисленную форму (evaluate=False — для поиска особых точек
+    вида (x²−1)/(x−1)) и numpy-функцию f(x). Результат мемоизируется по
+    строке: в live-режиме функция вызывается при каждой перерисовке.
+    Ошибки разбора НЕ кэшируются (бросаются вызывающему).
+    """
+    hit = _NUMPY_FUNC_CACHE.get(func_str)
+    if hit is not None:
+        return hit
+    from sympy.parsing.sympy_parser import parse_expr
+    src = _preprocess_func_str(func_str)
+    x = _X_SYM
+    transformations = _parse_transformations()
+    local_dict = _parse_local_dict()
+
+    expr_raw = parse_expr(src, evaluate=False,
                           transformations=transformations, local_dict=local_dict)
-    expr     = parse_expr(func_str, transformations=transformations,
-                          local_dict=local_dict)
-    f = lambdify(x, expr, modules=[
-        {'sqrt': np.sqrt, 'log': np.log, 'ln': np.log,
-         'exp': np.exp, 'sin': np.sin, 'cos': np.cos,
-         'tan': np.tan, 'abs': np.abs, 'pi': np.pi,
-         'asin': np.arcsin, 'acos': np.arccos, 'atan': np.arctan},
-        'numpy'
-    ])
+    expr = parse_expr(src, transformations=transformations,
+                      local_dict=local_dict)
+    expr = sympify(expr)
+    expr_raw = sympify(expr_raw)
+    extra = expr.free_symbols - {x}
+    if extra:
+        raise NameError(_unknown_names_msg(src, extra, local_dict))
+    f = lambdify(x, expr, modules=_LAMBDIFY_MODULES)
+    if len(_NUMPY_FUNC_CACHE) >= _FUNC_CACHE_LIMIT:
+        _NUMPY_FUNC_CACHE.clear()
+    _NUMPY_FUNC_CACHE[func_str] = (expr, expr_raw, f)
     return expr, expr_raw, f
 
 
@@ -217,36 +489,68 @@ def build_implicit_func(lhs_str, rhs_str):
     F(x,y) = G(x,y). Кривая — это множество точек, где H = 0, поэтому её
     можно нарисовать как линию уровня 0 (contour). Поддерживает pi/e,
     неявное умножение, ^ как степень — так же, как build_numpy_func.
-    Возвращает callable H(X, Y), работающий с массивами (meshgrid).
+    Возвращает (H_sympy, h), h(X, Y) работает с массивами (meshgrid).
+    Результат мемоизируется по паре строк.
     """
-    from sympy.parsing.sympy_parser import (
-        parse_expr, standard_transformations,
-        implicit_multiplication_application, convert_xor)
-    from sympy import E as _E, pi as _pi
-    x, y = symbols('x y')
-
-    transformations = (standard_transformations +
-                       (implicit_multiplication_application, convert_xor))
-    local_dict = {'e': _E, 'pi': _pi, 'x': x, 'y': y}
+    key = (lhs_str, rhs_str)
+    hit = _IMPLICIT_FUNC_CACHE.get(key)
+    if hit is not None:
+        return hit
+    from sympy.parsing.sympy_parser import parse_expr
+    x, y = _X_SYM, _Y_SYM
+    transformations = _parse_transformations()
+    local_dict = _parse_local_dict(with_y=True)
 
     lhs = parse_expr(_preprocess_func_str(lhs_str),
                      transformations=transformations, local_dict=local_dict)
     rhs = parse_expr(_preprocess_func_str(rhs_str),
                      transformations=transformations, local_dict=local_dict)
-    H = lhs - rhs
-
-    modules = [
-        {'sqrt': np.sqrt, 'log': np.log, 'ln': np.log,
-         'exp': np.exp, 'sin': np.sin, 'cos': np.cos,
-         'tan': np.tan, 'abs': np.abs, 'pi': np.pi,
-         'asin': np.arcsin, 'acos': np.arccos, 'atan': np.arctan},
-        'numpy'
-    ]
-    h = lambdify((x, y), H, modules=modules)
+    H = sympify(lhs - rhs)
+    extra = H.free_symbols - {x, y}
+    if extra:
+        raise NameError(_unknown_names_msg(lhs_str + ' ' + rhs_str, extra, local_dict))
+    h = lambdify((x, y), H, modules=_LAMBDIFY_MODULES)
+    if len(_IMPLICIT_FUNC_CACHE) >= _FUNC_CACHE_LIMIT:
+        _IMPLICIT_FUNC_CACHE.clear()
+    _IMPLICIT_FUNC_CACHE[key] = (H, h)
     return H, h
 
 
-def _scan_roots_1d(g, lo, hi, n=2000, xtol=1e-9):
+def _eval_array(f, xs):
+    """
+    Вычисляет f на всём массиве xs одним вызовом (векторно). Если функция
+    не векторизуется (исключение, неверная форма результата, скалярный
+    результат, не совпадающий с поточечным) — поточечный запасной цикл.
+    Неконечные и комплексные (с заметной мнимой частью) значения → NaN.
+    """
+    xs = np.asarray(xs, dtype=float)
+    try:
+        with np.errstate(all='ignore'):
+            out = f(xs)
+            out = np.asarray(out)
+            if np.iscomplexobj(out):
+                re_, im_ = out.real, out.imag
+                out = np.where(np.abs(im_) <= 1e-9 * np.maximum(1.0, np.abs(re_)),
+                               re_, np.nan)
+            if out.ndim == 0 and xs.size > 1:
+                # Скаляр на массив: либо константа (ок), либо функция «съела»
+                # массив через float() и вернула NaN — проверяем по точкам.
+                v = float(out)
+                for xi in (xs[0], xs[xs.size // 2], xs[-1]):
+                    p = _safe_val(f, xi)
+                    same = (np.isnan(v) and np.isnan(p)) or (np.isfinite(v) and p == v)
+                    if not same:
+                        raise ValueError("not vectorizable")
+            out = np.array(np.broadcast_to(out, xs.shape), dtype=float)
+            out[~np.isfinite(out)] = np.nan
+            return out
+    except Exception:
+        pass
+    with np.errstate(all='ignore'):
+        return np.array([_safe_val(f, xi) for xi in xs], dtype=float)
+
+
+def _scan_roots_1d(g, lo, hi, n=2000, xtol=1e-12):
     """
     Находит корни функции одной переменной g на [lo, hi]: сканирует мелкую
     сетку, ищет смену знака между соседними узлами и уточняет корень через
@@ -255,8 +559,7 @@ def _scan_roots_1d(g, lo, hi, n=2000, xtol=1e-9):
     X и g(t)=H(0,t) для оси Y.
     """
     ts = np.linspace(lo, hi, n)
-    with np.errstate(all='ignore'):
-        vals = np.array([_safe_scalar(g, t) for t in ts], dtype=float)
+    vals = _eval_array(g, ts)
     roots = []
 
     def _add(r):
@@ -272,7 +575,7 @@ def _scan_roots_1d(g, lo, hi, n=2000, xtol=1e-9):
             _add(a)
         if fa * fb < 0:
             try:
-                r = brentq(g, a, b, xtol=xtol)
+                r = brentq(lambda t: _safe_scalar(g, t), a, b, xtol=xtol)
                 if np.isfinite(r):
                     _add(r)
             except Exception:
@@ -406,28 +709,177 @@ def _safe_val(f, x):
         return np.nan
 
 
-def find_discontinuities_numerical(f, expr_sympy, expr_raw, x_lim_l, x_lim_r, n=10000):
+
+# ══════════════════════════════════════════════════════════════
+#  МНОЖЕСТВА SYMPY → ВЕЩЕСТВЕННЫЕ ТОЧКИ В ОКНЕ
+# ══════════════════════════════════════════════════════════════
+
+_ENUM_CACHE = {}        # (str(set), lo, hi) -> [(float, exact), ...]
+_ENUM_CACHE_LIMIT = 2000
+
+
+def _real_float(c):
+    """float вещественного числа sympy или None (символы / комплексное / ∞)."""
+    try:
+        if c.free_symbols:
+            return None
+        if c.has(oo, -oo, zoo, nan):
+            return None
+        cv = complex(c.evalf(15))
+        if abs(cv.imag) > 1e-9 * max(1.0, abs(cv.real)):
+            return None
+        v = cv.real
+        if not math.isfinite(v):
+            return None
+        return v
+    except Exception:
+        return None
+
+
+def _finite_elements(sset):
+    """Все элементы конечных множеств внутри (вложенных) Union/Complement."""
+    out = []
+    try:
+        if isinstance(sset, FiniteSet):
+            out.extend(list(sset.args))
+        elif isinstance(sset, (Union, Complement, Intersection)):
+            for a in sset.args:
+                out.extend(_finite_elements(a))
+    except Exception:
+        pass
+    return out
+
+
+def _enumerate_real_set(sset, lo, hi, nice=None, n_range=60, max_count=400):
+    """
+    Перечисляет вещественные элементы множества sympy, попадающие в [lo, hi]:
+    FiniteSet, Union, Complement, Intersection, ImageSet над Integers
+    (линейный образ a·n+b — по диапазону n, покрывающему окно; иначе
+    n ∈ [-n_range, n_range]). ConditionSet / EmptySet / прочее → [].
+    nice — словарь «элемент → его упрощённая форма» (см. exact_candidates).
+    Возвращает список пар (float, точное_значение).
+    """
+    if sset is None:
+        return []
+    ck = (str(sset), float(lo), float(hi))
+    hit = _ENUM_CACHE.get(ck)
+    if hit is not None:
+        return list(hit)
+    eps = 1e-9 * max(1.0, abs(hi - lo))
+    out = []
+
+    def _add(c):
+        if nice:
+            c = nice.get(c, c)
+        v = _real_float(c)
+        if v is None:
+            return
+        if lo - eps <= v <= hi + eps:
+            if not any(abs(v - w) < 1e-9 for w, _ in out):
+                out.append((v, c))
+
+    try:
+        if isinstance(sset, FiniteSet):
+            for c in sset.args:
+                _add(c)
+        elif isinstance(sset, Union):
+            for a in sset.args:
+                out.extend(_enumerate_real_set(a, lo, hi, nice, n_range, max_count))
+        elif isinstance(sset, Complement):
+            base, excl = sset.args
+            items = _enumerate_real_set(base, lo, hi, nice, n_range, max_count)
+            excluded = _enumerate_real_set(excl, lo, hi, nice, n_range, max_count)
+            out.extend(p for p in items
+                       if not any(abs(p[0] - q[0]) < 1e-9 for q in excluded))
+        elif isinstance(sset, Intersection):
+            parts = [a for a in sset.args if a != S.Reals]
+            lists = [_enumerate_real_set(a, lo, hi, nice, n_range, max_count)
+                     for a in parts]
+            lists = [l for l, a in zip(lists, parts)
+                     if not isinstance(a, ConditionSet)]
+            if lists:
+                cur = lists[0]
+                for other in lists[1:]:
+                    cur = [p for p in cur if any(abs(p[0] - q[0]) < 1e-9 for q in other)]
+                out.extend(cur)
+        elif isinstance(sset, ImageSet):
+            lamb = sset.lamda
+            bases = sset.base_sets
+            if (len(bases) == 1 and bases[0] == S.Integers
+                    and len(lamb.variables) == 1):
+                nsym = lamb.variables[0]
+                e = lamb.expr
+                done = False
+                try:
+                    poly = e.as_poly(nsym)
+                    if poly is not None and poly.degree() == 1:
+                        a = float(poly.coeff_monomial(nsym))
+                        b = float(poly.coeff_monomial(1))
+                        if a != 0.0 and math.isfinite(a) and math.isfinite(b):
+                            k1 = (lo - b) / a
+                            k2 = (hi - b) / a
+                            k_lo = int(math.ceil(min(k1, k2) - 1e-9))
+                            k_hi = int(math.floor(max(k1, k2) + 1e-9))
+                            if k_hi - k_lo + 1 <= max_count:
+                                for k in range(k_lo, k_hi + 1):
+                                    _add(e.subs(nsym, Integer(k)))
+                            done = True
+                except Exception:
+                    done = False
+                if not done:
+                    for k in range(-n_range, n_range + 1):
+                        _add(e.subs(nsym, Integer(k)))
+        # ConditionSet, EmptySet, Interval и прочее — нечего перечислять
+    except Exception:
+        pass
+
+    out.sort(key=lambda p: p[0])
+    if len(_ENUM_CACHE) >= _ENUM_CACHE_LIMIT:
+        _ENUM_CACHE.clear()
+    _ENUM_CACHE[ck] = list(out)
+    return out
+
+
+# ══════════════════════════════════════════════════════════════
+#  РАЗРЫВЫ И АСИМПТОТЫ
+# ══════════════════════════════════════════════════════════════
+
+def find_discontinuities_numerical(f, expr_sympy, expr_raw, x_lim_l, x_lim_r,
+                                   n=10000, exact_out=None):
+    """
+    Точки разрыва функции в окне [x_lim_l, x_lim_r] (список float).
+    Сначала — символьно (sympy singularities, через кэш sym_cached; в режиме
+    'cached' результат может быть отложен), затем, если ничего не найдено, —
+    численно: границы NaN-областей и резкие скачки на мелкой сетке.
+    exact_out (dict) получает точные значения точек: round(px, 8) -> sympy.
+    """
     disc = []
     x_sym = _get_x(expr_raw) if expr_raw.free_symbols else _get_x(expr_sympy)
 
+    tried = set()
     for expr_candidate in [expr_raw, expr_sympy]:
+        key = ('sing', str(expr_candidate))
+        if key in tried:
+            continue
+        tried.add(key)
         try:
-            sp_pts = list(singularities(expr_candidate, x_sym))
-            for pt in sp_pts:
-                if im(pt) == 0:
-                    px = float(re(pt))
-                    if x_lim_l <= px <= x_lim_r:
-                        if not any(abs(px - d) < 0.01 for d in disc):
-                            disc.append(round(px, 8))
+            sset = sym_cached(key, lambda e=expr_candidate: singularities(e, x_sym))
+            pts = _enumerate_real_set(sset, x_lim_l, x_lim_r)
         except Exception:
-            pass
+            # SymbolicPending / NotImplementedError и т.п. — пробуем дальше
+            continue
+        for px, pe in pts:
+            if not any(abs(px - d) < 0.01 for d in disc):
+                pr = round(px, 8)
+                disc.append(pr)
+                if exact_out is not None:
+                    exact_out[pr] = pe
         if disc:
             break
 
     if not disc:
         xs = np.linspace(x_lim_l, x_lim_r, n)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            ys = np.array([_safe_val(f, xi) for xi in xs], dtype=float)
+        ys = _eval_array(f, xs)
 
         bad = ~np.isfinite(ys)
         transitions = np.where(np.diff(bad.astype(int)) != 0)[0]
@@ -439,7 +891,7 @@ def find_discontinuities_numerical(f, expr_sympy, expr_raw, x_lim_l, x_lim_r, n=
                     disc.append(round(xc, 6))
 
         dy = np.abs(np.diff(ys))
-        threshold = max(50.0, 20 * np.nanstd(dy))
+        threshold = max(50.0, 20 * np.nanstd(dy)) if np.any(np.isfinite(dy)) else 50.0
         jumps = np.where(dy > threshold)[0]
         for idx in jumps:
             xc = (xs[idx] + xs[idx + 1]) / 2
@@ -452,21 +904,37 @@ def find_discontinuities_numerical(f, expr_sympy, expr_raw, x_lim_l, x_lim_r, n=
     return disc
 
 
-def classify_discontinuities(f, expr_sympy, disc_pts, y_lim_b, y_lim_t):
+def classify_discontinuities(f, expr_sympy, disc_pts, y_lim_b, y_lim_t,
+                             exact_pts=None, exact_out=None):
+    """
+    Делит точки разрыва на вертикальные асимптоты и устранимые разрывы
+    (holes). Пределы слева/справа считаются sympy через кэш (в точной точке,
+    если она известна из exact_pts), при неудаче/отложенном результате —
+    численно по окрестности. Возвращает (vasymps, removable), где removable —
+    список (x, y_предела). exact_out[x] = (x_точное | None, y_точное | None).
+    """
     x_sym = _get_x(expr_sympy)
     vasymps = []
     removable = []
 
     for dp in disc_pts:
         lim_val = None
+        lim_exact = None
+        pt_exact = exact_pts.get(dp) if exact_pts else None
+        pt_arg = pt_exact if pt_exact is not None else dp
         try:
-            lv_p = limit(expr_sympy, x_sym, dp, '+')
-            lv_m = limit(expr_sympy, x_sym, dp, '-')
+            key_base = ('lim', str(expr_sympy), str(pt_arg))
+            lv_p = sym_cached(key_base + ('+',),
+                              lambda: limit(expr_sympy, x_sym, pt_arg, '+'))
+            lv_m = sym_cached(key_base + ('-',),
+                              lambda: limit(expr_sympy, x_sym, pt_arg, '-'))
             if lv_p in (oo, -oo, zoo) or lv_m in (oo, -oo, zoo):
                 vasymps.append(dp)
                 continue
             if lv_p == lv_m and lv_p.is_real:
                 lim_val = float(lv_p)
+                if not lv_p.is_Float:
+                    lim_exact = lv_p
         except Exception:
             pass
 
@@ -483,6 +951,8 @@ def classify_discontinuities(f, expr_sympy, disc_pts, y_lim_b, y_lim_t):
 
         if lim_val is not None and y_lim_b <= lim_val <= y_lim_t:
             removable.append((dp, lim_val))
+            if exact_out is not None:
+                exact_out[dp] = (pt_exact, lim_exact)
         else:
             vasymps.append(dp)
 
@@ -496,7 +966,8 @@ def find_horizontal_asymptotes(f, expr_sympy, x_lim_l, x_lim_r, y_lim_b, y_lim_t
     for direction in [oo, -oo]:
         val = None
         try:
-            lv = limit(expr_sympy, x_sym, direction)
+            lv = sym_cached(('lim', str(expr_sympy), str(direction), ''),
+                            lambda d=direction: limit(expr_sympy, x_sym, d))
             if lv not in (oo, -oo, zoo, nan) and lv.is_real:
                 val = float(lv)
         except Exception:
@@ -504,8 +975,8 @@ def find_horizontal_asymptotes(f, expr_sympy, x_lim_l, x_lim_r, y_lim_b, y_lim_t
 
         if val is None:
             x_span = x_lim_r - x_lim_l
-            sign = 1 if direction == oo else -1
-            far_points = [sign * x_span * k for k in [100, 1000, 10000, 100000]]
+            sign_ = 1 if direction == oo else -1
+            far_points = [sign_ * x_span * k for k in [100, 1000, 10000, 100000]]
             probes = [_safe_val(f, xp) for xp in far_points]
             probes = [v for v in probes if np.isfinite(v)]
             if len(probes) >= 3:
@@ -722,8 +1193,466 @@ def prettify_math_text(text):
     return text
 
 
+
+# ══════════════════════════════════════════════════════════════
+#  ТОЧНЫЕ ПОДПИСИ: символьные кандидаты, идентификация, формат
+# ══════════════════════════════════════════════════════════════
+#
+# Вместо старого «прилипания» численных значений к π/e с допуском 2 %
+# (snap_to_nice) подписи теперь получаются так:
+#   1. точные решения sympy (solveset f=0, f'=0, f1−f2=0; пределы для holes)
+#      сопоставляются с точными численными результатами (brentq 1e-12,
+#      minimize_scalar);
+#   2. если решений нет — идентификация числа (nsimplify с допуском 1e-9),
+#      принимаемая ТОЛЬКО если результат простой и ПРОВЕРЕН (подстановка
+#      даёт ноль);
+#   3. иначе — десятичная запись.
+
+def _nice_const(c):
+    """Приводит константу к более читаемой форме: log(5·e) → 1 + log(5)."""
+    try:
+        if c.has(log):
+            c2 = expand_log(c, force=True)
+            if count_ops(c2) <= count_ops(c) + 1:
+                return c2
+    except Exception:
+        pass
+    return c
+
+
+def exact_candidates(expr, x_sym, kind, x_lo=None, x_hi=None):
+    """
+    Точные вещественные кандидаты в окне [x_lo, x_hi]:
+      kind='roots'    — solveset(expr = 0),
+      kind='critical' — solveset(expr' = 0).
+    Считается через sym_cached (в режиме 'cached' может бросить
+    SymbolicPending). Возвращает список пар (float, sympy). Любая неудача
+    sympy (NotImplementedError, ConditionSet …) → [].
+    """
+    if x_lo is None:
+        x_lo = X_LIM_L
+    if x_hi is None:
+        x_hi = X_LIM_R
+    key = ('roots' if kind == 'roots' else 'crit', str(expr), str(x_sym))
+
+    def job():
+        target = expr if kind == 'roots' else diff(expr, x_sym)
+        sset = solveset(target, x_sym, S.Reals)
+        nice = {}
+        for c in _finite_elements(sset):
+            n_ = _nice_const(c)
+            if n_ is not c:
+                nice[c] = n_
+        return sset, nice
+
+    try:
+        sset, nice = sym_cached(key, job)
+    except SymbolicPending:
+        raise
+    except Exception:
+        return []
+    try:
+        return _enumerate_real_set(sset, x_lo, x_hi, nice=nice)
+    except Exception:
+        return []
+
+
+_SIMPLE_INT_MAX = 1000
+_SIMPLE_DEN_MAX = 24
+
+
+def _is_simple(c):
+    """
+    «Простое» выражение: count_ops ≤ 6, все целые ≤ 1000, знаменатели
+    рациональных ≤ 24, степени — только целые |k| ≤ 4 или 1/2, 1/3, 1/4
+    над целыми/рациональными/π/e; из функций — только log от рационального.
+    """
+    try:
+        if c.free_symbols or c.is_Float:
+            return False
+        if count_ops(c) > 6:
+            return False
+        for a in c.atoms():
+            if a.is_Float:
+                return False
+            if a.is_Integer:
+                if abs(int(a)) > _SIMPLE_INT_MAX:
+                    return False
+            elif a.is_Rational:
+                if abs(a.p) > _SIMPLE_INT_MAX or a.q > _SIMPLE_DEN_MAX:
+                    return False
+            elif a.is_NumberSymbol:
+                if a not in (pi, E):
+                    return False
+            elif a.is_Number:
+                return False
+        for p in c.atoms(Pow):
+            base, ex = p.args
+            if not (base.is_Rational or base in (pi, E)):
+                return False
+            if ex.is_Integer:
+                if abs(int(ex)) > 4:
+                    return False
+            elif ex.is_Rational:
+                if ex.p != 1 or ex.q not in (2, 3, 4):
+                    return False
+                if not base.is_Rational or base < 0:
+                    return False
+            else:
+                return False
+        for e_ in c.atoms(exp):
+            if not e_.args[0].is_Integer or abs(int(e_.args[0])) > 4:
+                return False
+        for fn in c.atoms(Function):
+            if isinstance(fn, exp):
+                continue
+            if fn.func is log and len(fn.args) == 1 and fn.args[0].is_Rational \
+                    and fn.args[0] > 0:
+                continue
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _safe_verify(verify, c):
+    try:
+        return bool(verify(c))
+    except Exception:
+        return False
+
+
+def _is_zero_at(expr, sym, c, tol=1e-9):
+    """Проверка: expr(sym=c) == 0 (точно или численно с высокой точностью)."""
+    try:
+        v = expr.subs(sym, c)
+        if v == 0:
+            return True
+        if v.free_symbols or v.has(oo, -oo, zoo, nan):
+            return False
+        cv = complex(v.evalf(30))
+        return abs(cv) < tol
+    except Exception:
+        return False
+
+
+def _identify_by_nsimplify(v, verify, allow_consts, tol):
+    if abs(v) < 1e-12:
+        c = Integer(0)
+        return c if (verify is None or _safe_verify(verify, c)) else None
+    bases = [()]
+    if allow_consts:
+        bases += [(pi,), (E,)]
+    found = []
+    for consts in bases:
+        try:
+            c = nsimplify(v, list(consts), tolerance=tol)
+        except Exception:
+            continue
+        if c is None:
+            continue
+        c = sympify(c)
+        if not _is_simple(c):
+            continue
+        cv = _real_float(c)
+        if cv is None or abs(cv - v) > tol * max(1.0, abs(v)):
+            continue
+        if not any(c == d for _, d in found):
+            found.append((count_ops(c), c))
+    found.sort(key=lambda t: t[0])
+    for _, c in found:
+        if verify is None or _safe_verify(verify, c):
+            return c
+    return None
+
+
+def identify_value(v, candidates=(), verify=None, allow_consts=True,
+                   tol=1e-9, cache_key=None):
+    """
+    Точное значение для числа v (float) или None:
+      1) ближайший кандидат c (sympy или пара (float, sympy)) с
+         |float(c) − v| ≤ 1e-6·max(1, |v|) → c;
+      2) иначе nsimplify(v, [π] / [e] / без констант, tolerance=tol) —
+         принимается ТОЛЬКО если результат простой (_is_simple) И verify(c)
+         (если задан) возвращает True;
+      3) иначе None.
+    cache_key (кортеж строк) — шаг 2 выполняется через sym_cached, т.е.
+    в режиме 'cached' откладывается (тогда возвращается None).
+    """
+    try:
+        v = float(v)
+    except Exception:
+        return None
+    if not np.isfinite(v):
+        return None
+
+    best, best_d = None, None
+    for c in candidates:
+        if isinstance(c, tuple):
+            cv, ce = c
+        else:
+            ce = c
+            cv = _real_float(c)
+            if cv is None:
+                continue
+        d = abs(cv - v)
+        if d <= 1e-6 * max(1.0, abs(v)) and (best_d is None or d < best_d):
+            best, best_d = ce, d
+    if best is not None:
+        return best
+
+    def job():
+        return _identify_by_nsimplify(v, verify, allow_consts, tol)
+
+    if cache_key is not None:
+        key = ('ident',) + tuple(str(k) for k in cache_key) + (f"{v:.9g}",)
+        try:
+            return sym_cached(key, job)
+        except Exception:
+            return None
+    try:
+        return job()
+    except Exception:
+        return None
+
+
+def exact_y_of(expr, x_sym, cx):
+    """
+    Точное значение expr в точной точке cx: подстановка, при необходимости —
+    simplify через кэш (в режиме 'cached' может быть отложено → None).
+    Возвращает sympy-число, которое умеет форматировать fmt_sym, иначе None.
+    """
+    try:
+        e = sympify(expr).subs(x_sym, cx)
+        if e.free_symbols or e.has(oo, -oo, zoo, nan):
+            return None
+        if fmt_sym(e) is not None:
+            return e
+        s = sym_cached(('simp', str(e)), lambda: simplify(e))
+        if s.free_symbols or s.has(oo, -oo, zoo, nan):
+            return None
+        return s if fmt_sym(s) is not None else None
+    except Exception:
+        return None
+
+
+def _exact_matches(c, v, rel=1e-6):
+    """Точное значение c согласуется с численным v."""
+    cv = _real_float(c)
+    return cv is not None and abs(cv - v) <= rel * max(1.0, abs(v))
+
+
+_SUP_TRANS = str.maketrans('0123456789-', '⁰¹²³⁴⁵⁶⁷⁸⁹⁻')
+_ROOT_SIGNS = {2: '√', 3: '∛', 4: '∜'}
+_FMT_INT_MAX = 10 ** 6
+
+
+def _sup(k):
+    return str(int(k)).translate(_SUP_TRANS)
+
+
+def _fmt_base(b):
+    """Строка для иррационального множителя (π, e, eⁿ, √n, ∛n, ln(q)) или None."""
+    if b is pi:
+        return 'π'
+    if b is E:
+        return 'e'
+    if isinstance(b, exp):
+        k = b.args[0]
+        if k.is_Integer and 1 <= int(k) <= 9:
+            return 'e' if int(k) == 1 else 'e' + _sup(k)
+        return None
+    if b.is_Pow:
+        base, ex = b.args
+        if base is pi and ex.is_Integer and 2 <= int(ex) <= 9:
+            return 'π' + _sup(ex)
+        if base is E and ex.is_Integer and 2 <= int(ex) <= 9:
+            return 'e' + _sup(ex)
+        if (base.is_Integer and int(base) > 1 and int(base) <= _FMT_INT_MAX
+                and ex.is_Rational and ex.p == 1 and ex.q in _ROOT_SIGNS):
+            return _ROOT_SIGNS[ex.q] + str(int(base))
+        return None
+    if b.func is log and len(b.args) == 1:
+        a = b.args[0]
+        if a.is_Rational and a > 0 and a != 1 \
+                and abs(a.p) <= _FMT_INT_MAX and a.q <= _FMT_INT_MAX:
+            return 'ln(' + (str(a.p) if a.q == 1 else f'{a.p}/{a.q}') + ')'
+        return None
+    return None
+
+
+def _fmt_term(t):
+    """
+    Разбирает слагаемое c·B₁·B₂/(q·B₃): возвращает (знак, числитель,
+    знаменатель_строка, q) или None. q — целый знаменатель коэффициента.
+    """
+    c, rest = t.as_coeff_Mul()
+    if not c.is_Rational or c == 0:
+        return None
+    if abs(c.p) > _FMT_INT_MAX or c.q > _FMT_INT_MAX:
+        return None
+    num_f, den_f = [], []
+    if rest != 1:
+        for fac in Mul.make_args(rest):
+            if fac.is_Pow and fac.args[1].is_negative:
+                s = _fmt_base(fac.args[0] ** (-fac.args[1]))
+                target = den_f
+            elif isinstance(fac, exp) and fac.args[0].is_negative:
+                s = _fmt_base(exp(-fac.args[0]))
+                target = den_f
+            else:
+                s = _fmt_base(fac)
+                target = num_f
+            if s is None:
+                return None
+            target.append(s)
+    if len(num_f) > 2 or len(den_f) > 1:
+        return None
+    sign_ = -1 if c < 0 else 1
+    p, q = abs(c.p), c.q
+    num = ('' if (p == 1 and num_f) else str(p)) + ''.join(num_f)
+    return sign_, num, den_f, q
+
+
+def _join_den(q, den_f):
+    parts = ([str(q)] if q > 1 else []) + list(den_f)
+    if not parts:
+        return ''
+    s = ''.join(parts)
+    return '(' + s + ')' if len(parts) > 1 else s
+
+
+def fmt_sym(expr):
+    """
+    Компактная unicode-запись точного числа: 3, -1/2, π, 2π/3, -π/2, e, 2e,
+    e², √2, 2√3, √2/2, -√3/2, ∛2, 1+√2, (1+√13)/2, 1+ln(5), 2/π …
+    Возвращает None, если выражение не из этого класса (вызывающий печатает
+    десятичную запись).
+    """
+    try:
+        expr = sympify(expr)
+        if expr.free_symbols or expr.is_Float or expr.has(oo, -oo, zoo, nan):
+            return None
+        if expr.is_Integer:
+            n = int(expr)
+            return str(n) if abs(n) <= _FMT_INT_MAX else None
+        if expr.is_Rational:
+            if abs(expr.p) > _FMT_INT_MAX or expr.q > _FMT_INT_MAX:
+                return None
+            return f'{expr.p}/{expr.q}'
+        terms = Add.make_args(expr)
+        if len(terms) > 3:
+            return None
+        parsed = []
+        for t in terms:
+            pt = _fmt_term(t)
+            if pt is None:
+                return None
+            parsed.append(pt)
+
+        def term_str(pt, lead):
+            sign_, num, den_f, q = pt
+            body = num + ('/' + _join_den(q, den_f) if (q > 1 or den_f) else '')
+            if lead:
+                return ('-' if sign_ < 0 else '') + body
+            return ('-' if sign_ < 0 else '+') + body
+
+        if len(parsed) == 1:
+            return term_str(parsed[0], True)
+
+        # Порядок: рациональные слагаемые первыми; если первое отрицательное,
+        # а есть положительное — положительное вперёд (√13−1, а не −1+√13).
+        parsed.sort(key=lambda pt: 0 if pt[1].isdigit() else 1)
+        if parsed[0][0] < 0:
+            for i, pt in enumerate(parsed):
+                if pt[0] > 0:
+                    parsed.insert(0, parsed.pop(i))
+                    break
+
+        # Общий целый знаменатель: 1/2 + √13/2 → (1+√13)/2
+        qs = [pt[3] for pt in parsed]
+        if all(not pt[2] for pt in parsed) and any(q > 1 for q in qs):
+            d = 1
+            for q in qs:
+                d = d * q // math.gcd(d, q)
+            if d <= _FMT_INT_MAX:
+                inner = ''
+                for i, (sign_, num, den_f, q) in enumerate(parsed):
+                    mult = d // q
+                    # num — либо число, либо [число]·база
+                    k = 0
+                    while k < len(num) and num[k].isdigit():
+                        k += 1
+                    digits, tail = num[:k], num[k:]
+                    coef = (int(digits) if digits else 1) * mult
+                    body = ('' if (coef == 1 and tail) else str(coef)) + tail
+                    inner += ('-' if sign_ < 0 else ('' if i == 0 else '+')) + body
+                return f'({inner})/{d}'
+
+        return ''.join(term_str(pt, i == 0) for i, pt in enumerate(parsed))
+    except Exception:
+        return None
+
+
+def fmt_exact_or(v, c=None, dec=None):
+    """
+    Текст координаты: точная форма c (если задана, форматируется и
+    согласуется с v), иначе десятичная запись dec(v) (по умолчанию fmt_num).
+    """
+    if c is not None:
+        try:
+            if _exact_matches(c, v):
+                s = fmt_sym(c)
+                if s is not None:
+                    return s
+        except Exception:
+            pass
+    return (dec or fmt_num)(v)
+
+
+
+# ══════════════════════════════════════════════════════════════
+#  ЧИСЛЕННЫЙ ПОИСК ТОЧЕК
+# ══════════════════════════════════════════════════════════════
+
+def _refine_extremum(f, x_vals, idx, is_max):
+    """
+    Уточняет экстремум, найденный на сетке в узле idx, одномерной
+    минимизацией на скобке [x[idx-1], x[idx+1]] (minimize_scalar, bounded,
+    xatol=1e-10): x точен до ~1e-7, y — до ~1e-12. Если уточнение не
+    удалось или дало худшее значение — остаётся узел сетки.
+    """
+    i0 = max(0, idx - 1)
+    i1 = min(len(x_vals) - 1, idx + 1)
+    a, b = float(x_vals[i0]), float(x_vals[i1])
+    sgn = -1.0 if is_max else 1.0
+    y_grid = _safe_val(f, float(x_vals[idx]))
+
+    def obj(t):
+        v = _safe_val(f, t)
+        return sgn * v if np.isfinite(v) else 1e300
+
+    try:
+        res = minimize_scalar(obj, bounds=(a, b), method='bounded',
+                              options={'xatol': 1e-10, 'maxiter': 300})
+        xr = float(res.x)
+        yr = _safe_val(f, xr)
+        if (np.isfinite(yr) and a <= xr <= b
+                and (not np.isfinite(y_grid) or sgn * yr <= sgn * y_grid + 1e-12)):
+            return xr, yr
+    except Exception:
+        pass
+    return float(x_vals[idx]), float(y_grid)
+
+
 def find_extrema_numerical(f, x_vals, y_vals, y_lim_b, y_lim_t, disc_pts_x,
                            allow_pi=True, allow_e=True):
+    """
+    Локальные экстремумы по сетке (argrelextrema) с последующим уточнением
+    (_refine_extremum). Возвращает список (x, y) float — точных численно;
+    подпись (точная форма) подбирается уже в plot_function.
+    Параметры allow_pi/allow_e сохранены для совместимости и не используются.
+    """
     finite_mask = np.isfinite(y_vals)
     yf = np.where(finite_mask, y_vals, np.nan)
 
@@ -753,8 +1682,12 @@ def find_extrema_numerical(f, x_vals, y_vals, y_lim_b, y_lim_t, disc_pts_x,
 
     extrema = []
     seen = []
-    for idx in list(maxima_idx) + list(minima_idx):
+    for idx, is_max in ([(i, True) for i in maxima_idx] +
+                        [(i, False) for i in minima_idx]):
         if idx in nan_edges:
+            continue
+        # Крайние узлы окна — не экстремумы (функция продолжается за окном)
+        if idx == 0 or idx == len(x_vals) - 1:
             continue
         ex, ey = x_vals[idx], y_vals[idx]
         if not np.isfinite(ey):
@@ -766,13 +1699,18 @@ def find_extrema_numerical(f, x_vals, y_vals, y_lim_b, y_lim_t, disc_pts_x,
         if any(abs(ex - s) < 0.2 for s in seen):
             continue
         seen.append(ex)
-        ex = snap_to_nice(round(ex, 4), allow_pi=allow_pi, allow_e=allow_e)
-        ey = snap_to_nice(round(ey, 4), allow_pi=allow_pi, allow_e=allow_e)
-        extrema.append((ex, ey))
+        ex, ey = _refine_extremum(f, x_vals, idx, is_max)
+        if not (y_lim_b <= ey <= y_lim_t):
+            continue
+        extrema.append((float(ex), float(ey)))
     return extrema
 
 
 def find_x_intercepts(f, x_vals, y_vals, disc_pts, allow_pi=True, allow_e=True):
+    """
+    Нули функции: смена знака на сетке → brentq (xtol=1e-12); точные нули
+    в узлах сетки (y == 0) берутся как есть. Возвращает отсортированные float.
+    """
     zeros = []
     seen = []
     disc_x = [d[0] if isinstance(d, tuple) else d for d in disc_pts]
@@ -782,20 +1720,32 @@ def find_x_intercepts(f, x_vals, y_vals, disc_pts, allow_pi=True, allow_e=True):
     def is_near_disc(xv):
         return any(abs(xv - d) < disc_tol for d in disc_x)
 
-    for i in range(len(y_vals) - 1):
+    def add_zero(xz):
+        if not is_near_disc(xz) and not any(abs(xz - s) < 0.1 for s in seen):
+            seen.append(xz)
+            zeros.append(float(xz))
+
+    def fscalar(t):
+        v = _safe_val(f, t)
+        return v if np.isfinite(v) else float('nan')
+
+    n = len(y_vals)
+    for i in range(n - 1):
         y0, y1 = y_vals[i], y_vals[i + 1]
         x0, x1 = x_vals[i], x_vals[i + 1]
         if not (np.isfinite(y0) and np.isfinite(y1)):
             continue
+        if y0 == 0.0:
+            add_zero(x0)
+            continue
         if y0 * y1 < 0:
             try:
-                xz = brentq(f, x0, x1, xtol=1e-8)
-                if not is_near_disc(xz) and not any(abs(xz - s) < 0.1 for s in seen):
-                    seen.append(xz)
-                    zeros.append(snap_to_nice(round(xz, 4),
-                                              allow_pi=allow_pi, allow_e=allow_e))
+                xz = brentq(fscalar, x0, x1, xtol=1e-12)
+                add_zero(xz)
             except Exception:
                 pass
+    if n and np.isfinite(y_vals[-1]) and y_vals[-1] == 0.0:
+        add_zero(x_vals[-1])
 
     return sorted(zeros)
 
@@ -814,11 +1764,12 @@ def find_y_intercept(f, disc_pts, y_lim_b, y_lim_t):
     return None
 
 
+
+
 def make_y_array(f, x_vals, disc_pts, y_lim_b, y_lim_t, tol=0.05):
-    """Вычисляет y; маскирует окрестность разрывов и выбросы."""
+    """Вычисляет y (векторно, см. _eval_array); маскирует окрестность разрывов и выбросы."""
     y_span = y_lim_t - y_lim_b
-    with np.errstate(invalid='ignore', divide='ignore', over='ignore'):
-        ys = np.array([_safe_val(f, xi) for xi in x_vals], dtype=float)
+    ys = _eval_array(f, x_vals)
     for dp in disc_pts:
         ys[np.abs(x_vals - dp) < tol] = np.nan
     ys[np.abs(ys) > y_span * 20] = np.nan
@@ -830,8 +1781,9 @@ def find_intersections(f1, f2, x_vals, y1_vals, y2_vals, disc_pts_x):
     Находит точки пересечения двух функций:
     1. Знакосмены (y1-y2) → Брент (обычные пересечения)
     2. Локальные минимумы |y1-y2| близкие к 0 → касательные точки
+    Возвращает список (x, y) float без округления.
     """
-    diff = y1_vals - y2_vals
+    diff_arr = y1_vals - y2_vals
     points = []
     seen = []
 
@@ -848,32 +1800,36 @@ def find_intersections(f1, f2, x_vals, y1_vals, y2_vals, disc_pts_x):
         yz = _safe_val(f1, xz)
         if np.isfinite(yz):
             seen.append(xz)
-            points.append((round(xz, 4), round(yz, 4)))
+            points.append((float(xz), float(yz)))
 
     def diff_f(x):
         v1 = _safe_val(f1, x)
         v2 = _safe_val(f2, x)
         return v1 - v2 if (np.isfinite(v1) and np.isfinite(v2)) else float('nan')
 
-    abs_diff = np.abs(diff)
+    abs_diff = np.abs(diff_arr)
 
-    for i in range(len(diff) - 1):
-        d0, d1 = diff[i], diff[i + 1]
+    for i in range(len(diff_arr) - 1):
+        d0, d1 = diff_arr[i], diff_arr[i + 1]
         x0, x1 = x_vals[i], x_vals[i + 1]
         if not (np.isfinite(d0) and np.isfinite(d1)):
+            continue
+
+        # Точное совпадение в узле сетки
+        if d0 == 0.0:
+            add_point(x0)
             continue
 
         # Случай 1: знакосмена → обычное пересечение
         if d0 * d1 < 0:
             try:
-                xz = brentq(diff_f, x0, x1, xtol=1e-8)
+                xz = brentq(diff_f, x0, x1, xtol=1e-12)
                 add_point(xz)
             except Exception:
                 pass
 
     # Случай 2: локальный минимум |diff| → касательная точка
     # Ищем точки где |diff| минимально и очень мало
-    from scipy.signal import argrelextrema
     finite_mask = np.isfinite(abs_diff)
     if np.sum(finite_mask) > 3:
         # Адаптивный порог: 0.1% от максимального |diff|
@@ -884,13 +1840,13 @@ def find_intersections(f1, f2, x_vals, y1_vals, y2_vals, disc_pts_x):
             if abs_diff[idx] < threshold:
                 # Уточняем минимум через minimize_scalar
                 try:
-                    from scipy.optimize import minimize_scalar
                     i0 = max(0, idx - 5)
                     i1 = min(len(x_vals) - 1, idx + 5)
                     res = minimize_scalar(
                         lambda x: abs(diff_f(x)),
                         bounds=(x_vals[i0], x_vals[i1]),
-                        method='bounded'
+                        method='bounded',
+                        options={'xatol': 1e-10}
                     )
                     if res.fun < threshold:
                         add_point(res.x)
@@ -898,18 +1854,23 @@ def find_intersections(f1, f2, x_vals, y1_vals, y2_vals, disc_pts_x):
                     add_point(x_vals[idx])
 
     return points
-    y_span = y_lim_t - y_lim_b
-    with np.errstate(invalid='ignore', divide='ignore', over='ignore'):
-        ys = np.array([_safe_val(f, xi) for xi in x_vals], dtype=float)
-    for dp in disc_pts:
-        ys[np.abs(x_vals - dp) < tol] = np.nan
-    ys[np.abs(ys) > y_span * 20] = np.nan
-    return ys
+
 
 
 # ══════════════════════════════════════════════════════════════
 #  DRAGGABLE ANNOTATIONS
 # ══════════════════════════════════════════════════════════════
+
+# Пользовательские смещения подписей точек, переживающие перерисовку
+# (в live-режиме график перестраивается при каждом изменении — перетащенная
+# подпись не должна «прыгать» назад). Ключ: (текст, round(px,3), round(py,3)),
+# значение: (dx, dy) в ПУНКТАХ относительно стандартного положения.
+ANNOTATION_OFFSETS = {}
+
+
+def reset_annotation_offsets():
+    ANNOTATION_OFFSETS.clear()
+
 
 class DraggableAnnotation:
     """Позволяет перетаскивать текстбокс аннотации мышью."""
@@ -923,14 +1884,31 @@ class DraggableAnnotation:
     # он свой), чтобы замок автоматически «сбрасывался» на следующем клике.
     _press_claimed_by = {}   # id(event) -> DraggableAnnotation
 
-    def __init__(self, annotation):
+    def __init__(self, annotation, key=None, home=None, pt_scale=None):
+        # key      — ключ в ANNOTATION_OFFSETS (None — не запоминать);
+        # home     — стандартное положение текста (в координатах данных);
+        # pt_scale — (единиц данных на пункт по X, по Y).
         self.ann   = annotation
         self.press = None
         self.fig   = annotation.figure
+        self.key   = key
+        self.home  = home
+        self.pt_scale = pt_scale
         self.ann.set_picker(True)
-        self.cidpress   = self.fig.canvas.mpl_connect('button_press_event',   self.on_press)
-        self.cidrelease = self.fig.canvas.mpl_connect('button_release_event', self.on_release)
-        self.cidmotion  = self.fig.canvas.mpl_connect('motion_notify_event',  self.on_motion)
+        canvas = self.fig.canvas
+        self.cidpress   = canvas.mpl_connect('button_press_event',   self.on_press)
+        self.cidrelease = canvas.mpl_connect('button_release_event', self.on_release)
+        self.cidmotion  = canvas.mpl_connect('motion_notify_event',  self.on_motion)
+
+    def disconnect(self):
+        """Отписывается от событий мыши (перед перерисовкой графика)."""
+        try:
+            canvas = self.fig.canvas
+            for cid in (self.cidpress, self.cidrelease, self.cidmotion):
+                canvas.mpl_disconnect(cid)
+        except Exception:
+            pass
+        self.press = None
 
     def on_press(self, event):
         if event.inaxes != self.ann.axes:
@@ -967,9 +1945,26 @@ class DraggableAnnotation:
         self.fig.canvas.draw_idle()
 
     def on_release(self, event):
+        if self.press is not None:
+            self._store_offset()
         self.press = None
         self.fig.canvas.draw_idle()
 
+    def _store_offset(self):
+        """Запоминает смещение от стандартного положения (в пунктах)."""
+        if self.key is None or self.home is None or not self.pt_scale:
+            return
+        try:
+            x, y = self.ann.get_position()
+            sx, sy = self.pt_scale
+            dx = (x - self.home[0]) / sx if sx else 0.0
+            dy = (y - self.home[1]) / sy if sy else 0.0
+            if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+                ANNOTATION_OFFSETS.pop(self.key, None)
+            else:
+                ANNOTATION_OFFSETS[self.key] = (float(dx), float(dy))
+        except Exception:
+            pass
 
 # ══════════════════════════════════════════════════════════════
 #  СВОБОДНЫЕ ПОДПИСИ НА ГРАФИКЕ (добавляются прямо на холсте)
@@ -1018,6 +2013,17 @@ class FreeTextManager:
         self.cid_motion  = fig.canvas.mpl_connect('motion_notify_event',  self.on_motion)
         self.cid_release = fig.canvas.mpl_connect('button_release_event', self.on_release)
         self.cid_scroll  = fig.canvas.mpl_connect('scroll_event',         self.on_scroll)
+
+    def disconnect(self):
+        """Отписывается от событий мыши (перед перерисовкой графика)."""
+        try:
+            canvas = self.fig.canvas
+            for cid in (self.cid_press, self.cid_motion,
+                        self.cid_release, self.cid_scroll):
+                canvas.mpl_disconnect(cid)
+        except Exception:
+            pass
+        self.drag = None
 
     # ── Отрисовка ──────────────────────────────────────────
     def _create_artist(self, record):
@@ -1248,6 +2254,16 @@ class AxisLabelManager:
         self.cid_motion  = fig.canvas.mpl_connect('motion_notify_event',  self.on_motion)
         self.cid_release = fig.canvas.mpl_connect('button_release_event', self.on_release)
 
+    def disconnect(self):
+        """Отписывается от событий мыши (перед перерисовкой графика)."""
+        try:
+            canvas = self.fig.canvas
+            for cid in (self.cid_press, self.cid_motion, self.cid_release):
+                canvas.mpl_disconnect(cid)
+        except Exception:
+            pass
+        self.drag = None
+
     def _apply_offset(self, key):
         # Итоговое смещение = домашнее + пользовательский сдвиг (в пунктах)
         from matplotlib.transforms import ScaledTranslation
@@ -1368,6 +2384,7 @@ CURVE_COLORS = [
 CURVE_WIDTHS = []   # ширина линий (пусто = 1.8 для всех)
 CURVE_STYLES = []   # тип линий: "-", "--", ":" (пусто = "-" для всех)
 
+
 # Держим ссылки на текущие DraggableAnnotation на уровне МОДУЛЯ, а не внутри
 # plot_function(). matplotlib подписывает bound-методы (self.on_press и т.д.)
 # через weakref — если на сам объект DraggableAnnotation не остаётся ни одной
@@ -1379,8 +2396,80 @@ CURVE_STYLES = []   # тип линий: "-", "--", ":" (пусто = "-" для
 # терялся вместе со всеми подписками на drag).
 _ACTIVE_DRAGGABLES = []
 
-def plot_function():
+
+def _short_error(exc):
+    """Короткое человекочитаемое описание ошибки одной кривой."""
+    from tokenize import TokenError
+    try:
+        from sympy import SympifyError
+    except Exception:          # pragma: no cover
+        SympifyError = ()
+    if isinstance(exc, (SyntaxError, TokenError, SympifyError)):
+        return "Syntax error"
+    if isinstance(exc, NameError):
+        msg = str(exc).strip()
+        return msg if msg else "Unknown name"
+    if isinstance(exc, TypeError):
+        return "Invalid expression"
+    if isinstance(exc, ValueError):
+        msg = str(exc).strip().splitlines()[0] if str(exc).strip() else ''
+        return (msg or "Invalid value")[:80]
+    msg = str(exc).strip().splitlines()[0] if str(exc).strip() else ''
+    name = type(exc).__name__
+    out = f"{name}: {msg}" if msg else name
+    return out[:80]
+
+
+def _vline_exact(func_str):
+    """Точное значение c из строки 'x = c' (parse_exact правой части)."""
+    try:
+        _, _, right = str(func_str).partition('=')
+        return parse_exact(right)
+    except Exception:
+        return None
+
+
+def _disconnect_previous():
+    """Отписывает интерактивные объекты предыдущего построения."""
+    global _active_free_text_manager, _active_axis_label_manager
+    for d in _ACTIVE_DRAGGABLES:
+        try:
+            d.disconnect()
+        except Exception:
+            pass
+    _ACTIVE_DRAGGABLES.clear()
+    if _active_free_text_manager is not None:
+        try:
+            _active_free_text_manager.disconnect()
+        except Exception:
+            pass
+        _active_free_text_manager = None
+    if _active_axis_label_manager is not None:
+        try:
+            _active_axis_label_manager.disconnect()
+        except Exception:
+            pass
+        _active_axis_label_manager = None
+
+
+def plot_function(fig=None):
+    """
+    Строит график по текущим настройкам модуля.
+      fig=None — standalone: своя фигура 6×6, tight_layout, plt.show().
+      fig задана — очищает её, рисует в fig.add_subplot(111), plt.show() НЕ
+      вызывает (GUI с встроенным холстом).
+    Возвращает {'ax': ax, 'errors': {индекс_функции: сообщение},
+                'pending': были ли отложены символьные вычисления}.
+    Ошибка одной кривой не роняет весь график: она попадает в errors,
+    остальные кривые рисуются.
+    """
     global CURVE_WIDTHS, CURVE_STYLES, CURVE_COLORS
+    global _active_free_text_manager, _active_axis_label_manager
+
+    _DRAW_STATE['pending'] = False
+    _disconnect_previous()
+    errors = {}
+
     x_span = X_LIM_R - X_LIM_L
     y_span = Y_LIM_T - Y_LIM_B
 
@@ -1388,14 +2477,17 @@ def plot_function():
     GRID_COLOR   = "#cccccc"
     LABEL_COLOR  = "#000000"
 
-    _scale_geom = math.sqrt(x_span * y_span)  # оставляем для совместимости
+    _scale_geom = math.sqrt(abs(x_span * y_span))  # оставляем для совместимости
     _FS       = max(4, min(24, FONT_SIZE))     # зажимаем в разумные пределы
     AXIS_FS   = max(6, int(_FS * 1.1))
     TICK_FS   = max(4, int(_FS * 0.9))
 
-    plt.rcParams['font.family'] = 'Calibri'
-
-    fig, ax = plt.subplots(figsize=(6, 6))
+    standalone = fig is None
+    if standalone:
+        fig, ax = plt.subplots(figsize=(6, 6))
+    else:
+        fig.clear()
+        ax = fig.add_subplot(111)
     ax.set_facecolor("white")
     fig.patch.set_facecolor("white")
 
@@ -1480,18 +2572,28 @@ def plot_function():
 
     # ── Вспомогательные функции подписи ──────────
     def fmt2(v):
+        """Десятичная запись координаты (2 знака); кратные π/e — через fmt_num."""
         if abs(v) < 1e-12:
             return '0'
-        # fmt_num уже распознаёт кратные π (знаменатели 1,2,3,4,6) и e.
-        # Если оно вернуло форму с π или e — используем её.
-        s = fmt_num(v)
+        # fmt_num распознаёт кратные π (знаменатели 1,2,3,4,6) и e; численные
+        # значения теперь точны до ~1e-10, поэтому допуск узкий.
+        s = fmt_num(v, tol=1e-6)
         if 'π' in s or 'e' in s:
             return s
         s = f'{v:.2f}'
-        return s.rstrip('0').rstrip('.')
+        s = s.rstrip('0').rstrip('.')
+        if s in ('-0', '', '-'):
+            s = '0'
+        return s
+
+    def coord(v, c=None):
+        """Текст одной координаты: точная форма c (если есть и согласуется), иначе fmt2."""
+        return fmt_exact_or(v, c, dec=fmt2)
+
+    def label_xy(px, py, cx=None, cy=None):
+        return f"({coord(px, cx)}, {coord(py, cy)})"
 
     draggables = _ACTIVE_DRAGGABLES
-    draggables.clear()   # отпускаем подписи предыдущего графика
 
     # Множество уже подписанных точек (округлённые координаты), чтобы одна и
     # та же точка не подписывалась дважды — например (1, 0) у (x-1)(x+2) и у
@@ -1513,6 +2615,12 @@ def plot_function():
         ax.plot(px, py, 'o', color=color, **opts)
         return True
 
+    # Переводим offset points → единицы данных для xytext
+    # чтобы drag работал в системе координат данных
+    _fig_w_in, _fig_h_in = fig.get_size_inches()
+    pt_to_x = x_span / (_fig_w_in * 72)
+    pt_to_y = y_span / (_fig_h_in * 72)
+
     def annotate_point(px, py, label, above, color, side=None):
         # Дедупликация: если такая точка уже подписана — пропускаем.
         key = _point_key(px, py)
@@ -1523,11 +2631,6 @@ def plot_function():
         near_y = abs(px - y_axis_x) < x_span * 0.12
         BBOX   = dict(boxstyle='round,pad=0.3', fc='none',
                       ec='none', alpha=0.95)
-
-        # Переводим offset points → единицы данных для xytext
-        # чтобы drag работал в системе координат данных
-        pt_to_x = x_span / (fig.get_size_inches()[0] * 72)
-        pt_to_y = y_span / (fig.get_size_inches()[1] * 72)
 
         if side is not None:
             dx_pt = 8 if side == 'right' else -8
@@ -1543,6 +2646,17 @@ def plot_function():
         ha  = ha  if side is not None else 'center'
         va  = 'bottom' if (side is not None or above) else 'top'
 
+        # Пользовательское смещение (перетащенная ранее подпись)
+        home = (txt_x, txt_y)
+        off_key = (str(label), round(float(px), 3), round(float(py), 3))
+        off = ANNOTATION_OFFSETS.get(off_key)
+        if off:
+            try:
+                txt_x = home[0] + float(off[0]) * pt_to_x
+                txt_y = home[1] + float(off[1]) * pt_to_y
+            except Exception:
+                txt_x, txt_y = home
+
         ann = ax.annotate(
             label,
             xy=(px, py),
@@ -1555,7 +2669,8 @@ def plot_function():
             annotation_clip=False,
             zorder=10,
         )
-        draggables.append(DraggableAnnotation(ann))
+        draggables.append(DraggableAnnotation(ann, key=off_key, home=home,
+                                              pt_scale=(pt_to_x, pt_to_y)))
         return ann
 
     def choose_side(px, py, f):
@@ -1570,6 +2685,23 @@ def plot_function():
     ON_Y_AXIS_TOL = x_span * 0.05
     x_vals = np.linspace(X_LIM_L, X_LIM_R, 6000)
 
+    # ── Точные подписи: обёртки, никогда не бросающие исключений ──
+    def cands(expr, sym, kind, lo, hi):
+        try:
+            return exact_candidates(expr, sym, kind, lo, hi)
+        except Exception:        # SymbolicPending (флаг pending уже выставлен) и пр.
+            return []
+
+    def exact_root(v, expr, sym, cand_list, tag):
+        return identify_value(v, cand_list,
+                              verify=lambda c: _is_zero_at(expr, sym, c),
+                              cache_key=(tag, str(expr), str(sym)))
+
+    def exact_crit(v, expr, sym, cand_list):
+        return identify_value(v, cand_list,
+                              verify=lambda c: _is_zero_at(diff(expr, sym), sym, c),
+                              tol=1e-7, cache_key=('crit', str(expr), str(sym)))
+
     # ══════════════════════════════════════════════
     #  ЦИКЛ ПО ФУНКЦИЯМ
     # ══════════════════════════════════════════════
@@ -1578,105 +2710,96 @@ def plot_function():
     func_data    = []   # [(f, y_vals, color), ...] — для заливки после цикла
     # Параллельный список метаданных кривой (та же длина/порядок, что func_data)
     # для расчёта пересечений между разными типами кривых. Каждый элемент —
-    # dict: {'kind','color', и колбэки}. kind ∈ 'func' | 'implicit' | 'vline'.
+    # dict: {'kind','color', и колбэки}. kind ∈ 'func' | 'implicit' | 'vline' | 'error'.
     curve_meta   = []
 
-    for func_idx, func_str in enumerate(FUNCS):
-        color = CURVE_COLORS[func_idx % len(CURVE_COLORS)]
+    def draw_vline(func_idx, func_str, payload, color, lw, ls):
+        cx = payload
+        if cx is None or not np.isfinite(cx):
+            raise ValueError(f"cannot parse the constant in '{func_str}'")
+        cx_exact = _vline_exact(func_str)
+        # Учитываем домен функции (если задан) как ограничение по Y:
+        # домен для вертикали трактуем как диапазон Y, на котором
+        # её рисовать. По умолчанию — весь видимый Y.
+        y_lo_line, y_hi_line = Y_LIM_B, Y_LIM_T
+        if func_idx < len(FUNC_DOMAINS):
+            d_from, d_to = FUNC_DOMAINS[func_idx]
+            if d_from != float("-inf"):
+                y_lo_line = max(y_lo_line, d_from)
+            if d_to != float("inf"):
+                y_hi_line = min(y_hi_line, d_to)
+        if X_LIM_L <= cx <= X_LIM_R and y_lo_line < y_hi_line:
+            ax.plot([cx, cx], [y_lo_line, y_hi_line],
+                    color=color, linewidth=lw, linestyle=ls, zorder=5)
+            # Подпись точки пересечения с осью X: (c, 0)
+            if X_TAG and Y_LIM_B <= 0 <= Y_LIM_T:
+                if SHOW_VALUES:
+                    annotate_point(cx, 0.0, f'({coord(cx, cx_exact)}, 0)',
+                                   above=True, color=color)
+                mark_point(cx, 0, color, markersize=5, zorder=8)
+        func_data.append((None, None, color))
+        curve_meta.append({'kind': 'vline', 'color': color,
+                           'x': cx, 'x_exact': cx_exact})
 
-        kind, payload = _parse_equation_input(func_str)
-        lw = CURVE_WIDTHS[func_idx] if func_idx < len(CURVE_WIDTHS) else 1.8
-        ls = CURVE_STYLES[func_idx] if func_idx < len(CURVE_STYLES) else "-"
+    def draw_implicit(func_idx, lhs_str, rhs_str, color, lw, ls):
+        H_sym, h = build_implicit_func(lhs_str, rhs_str)
+        # Сетка по видимому окну. Плотность подобрана как компромисс
+        # гладкость/скорость; contour сам интерполирует линию уровня 0.
+        N = 600
+        xs = np.linspace(X_LIM_L, X_LIM_R, N)
+        ys = np.linspace(Y_LIM_B, Y_LIM_T, N)
+        X, Y = np.meshgrid(xs, ys)
+        with np.errstate(all='ignore'):
+            Z = h(X, Y)
+            Z = np.asarray(Z, dtype=float)
+            Z = np.broadcast_to(Z, X.shape)
+        # Рисуем линию уровня 0 => кривую F−G=0
+        # linestyles matplotlib ожидает 'solid'/'dashed'/'dotted'
+        ls_map = {'-': 'solid', '--': 'dashed', ':': 'dotted', '-.': 'dashdot'}
+        ax.contour(X, Y, Z, levels=[0], colors=[color],
+                   linewidths=lw, linestyles=[ls_map.get(ls, 'solid')],
+                   zorder=5)
 
-        # ── Вертикальная линия  x = c ───────────────────────────
-        if kind == 'vline':
-            cx = payload
-            if cx is not None and np.isfinite(cx):
-                # Учитываем домен функции (если задан) как ограничение по Y:
-                # домен для вертикали трактуем как диапазон Y, на котором
-                # её рисовать. По умолчанию — весь видимый Y.
-                y_lo_line, y_hi_line = Y_LIM_B, Y_LIM_T
-                if func_idx < len(FUNC_DOMAINS):
-                    d_from, d_to = FUNC_DOMAINS[func_idx]
-                    if d_from != float("-inf"):
-                        y_lo_line = max(y_lo_line, d_from)
-                    if d_to != float("inf"):
-                        y_hi_line = min(y_hi_line, d_to)
-                if X_LIM_L <= cx <= X_LIM_R and y_lo_line < y_hi_line:
-                    ax.plot([cx, cx], [y_lo_line, y_hi_line],
-                            color=color, linewidth=lw, linestyle=ls, zorder=5)
-                    # Подпись точки пересечения с осью X: (c, 0)
-                    if X_TAG and Y_LIM_B <= 0 <= Y_LIM_T:
-                        vp, ve = detect_const_context(func_str)
-                        cx_s = snap_to_nice(round(cx, 4), allow_pi=vp, allow_e=ve)
-                        if SHOW_VALUES:
-                            annotate_point(cx_s, 0.0, f'({fmt2(cx_s)}, 0)',
-                                           above=True, color=color)
-                        mark_point(cx_s, 0, color, markersize=5, zorder=8)
-            # placeholder, чтобы индексы заливки (f1/f2) совпадали с FUNCS
-            func_data.append((None, None, color))
-            curve_meta.append({'kind': 'vline', 'color': color,
-                               'x': cx if (payload is not None) else None})
-            continue
+        # ── Пересечения неявной кривой с осями ──────────
+        # Ось X: корни H(x, 0)=0 -> точки (x, 0)
+        # Ось Y: корни H(0, y)=0 -> точки (0, y)
+        if X_TAG and (Y_LIM_B <= 0 <= Y_LIM_T):
+            gx = lambda t: h(t, 0.0)
+            Hx0 = H_sym.subs(_Y_SYM, 0)
+            cx_list = cands(Hx0, _X_SYM, 'roots', X_LIM_L, X_LIM_R)
+            for xr in _scan_roots_1d(gx, X_LIM_L, X_LIM_R):
+                xe = exact_root(xr, Hx0, _X_SYM, cx_list, 'root')
+                mark_point(xr, 0.0, color, markersize=5, zorder=8)
+                if SHOW_VALUES:
+                    annotate_point(xr, 0.0, f'({coord(xr, xe)}, 0)',
+                                   above=True, color=color)
+        if Y_TAG and (X_LIM_L <= 0 <= X_LIM_R):
+            gy = lambda t: h(0.0, t)
+            H0y = H_sym.subs(_X_SYM, 0)
+            cy_list = cands(H0y, _Y_SYM, 'roots', Y_LIM_B, Y_LIM_T)
+            for yr in _scan_roots_1d(gy, Y_LIM_B, Y_LIM_T):
+                ye = exact_root(yr, H0y, _Y_SYM, cy_list, 'root')
+                mark_point(0.0, yr, color, markersize=5, zorder=8)
+                if SHOW_VALUES:
+                    annotate_point(0.0, yr, f'(0, {coord(yr, ye)})',
+                                   above=True, color=color, side='right')
+        func_data.append((None, None, color))
+        curve_meta.append({'kind': 'implicit', 'color': color, 'h': h, 'H': H_sym})
 
-        # ── Неявная кривая  F(x, y) = G(x, y) ───────────────────
-        if kind == 'implicit':
-            lhs_str, rhs_str = payload
-            h = None
-            try:
-                _H_sym, h = build_implicit_func(lhs_str, rhs_str)
-                # Сетка по видимому окну. Плотность подобрана как компромисс
-                # гладкость/скорость; contour сам интерполирует линию уровня 0.
-                N = 600
-                xs = np.linspace(X_LIM_L, X_LIM_R, N)
-                ys = np.linspace(Y_LIM_B, Y_LIM_T, N)
-                X, Y = np.meshgrid(xs, ys)
-                with np.errstate(all='ignore'):
-                    Z = h(X, Y)
-                    Z = np.asarray(Z, dtype=float)
-                # Рисуем линию уровня 0 => кривую F−G=0
-                # linestyles matplotlib ожидает 'solid'/'dashed'/'dotted'
-                ls_map = {'-': 'solid', '--': 'dashed', ':': 'dotted', '-.': 'dashdot'}
-                ax.contour(X, Y, Z, levels=[0], colors=[color],
-                           linewidths=lw, linestyles=[ls_map.get(ls, 'solid')],
-                           zorder=5)
-
-                # ── Пересечения неявной кривой с осями ──────────
-                # Ось X: корни H(x, 0)=0 -> точки (x, 0)
-                # Ось Y: корни H(0, y)=0 -> точки (0, y)
-                ip, ie = detect_const_context(lhs_str + ' ' + rhs_str)
-                if X_TAG and (Y_LIM_B <= 0 <= Y_LIM_T):
-                    gx = lambda t: h(t, 0.0)
-                    for xr in _scan_roots_1d(gx, X_LIM_L, X_LIM_R):
-                        xs_ = snap_to_nice(round(xr, 4), allow_pi=ip, allow_e=ie)
-                        mark_point(xs_, 0.0, color, markersize=5, zorder=8)
-                        if SHOW_VALUES:
-                            annotate_point(xs_, 0.0, f'({fmt2(xs_)}, 0)',
-                                           above=True, color=color)
-                if Y_TAG and (X_LIM_L <= 0 <= X_LIM_R):
-                    gy = lambda t: h(0.0, t)
-                    for yr in _scan_roots_1d(gy, Y_LIM_B, Y_LIM_T):
-                        ys_ = snap_to_nice(round(yr, 4), allow_pi=ip, allow_e=ie)
-                        mark_point(0.0, ys_, color, markersize=5, zorder=8)
-                        if SHOW_VALUES:
-                            annotate_point(0.0, ys_, f'(0, {fmt2(ys_)})',
-                                           above=True, color=color, side='right')
-            except Exception:
-                # Некорректное выражение — тихо пропускаем эту кривую,
-                # не роняя весь график.
-                h = None
-            func_data.append((None, None, color))
-            curve_meta.append({'kind': 'implicit', 'color': color, 'h': h})
-            continue
-
-        # Обычная функция (для 'y = f(x)' префикс уже снят)
-        func_str = payload
+    def draw_func(func_idx, func_str, color, lw, ls):
         expr, expr_raw, f = build_numpy_func(func_str)
-        allow_pi, allow_e = detect_const_context(func_str)
+        x_sym = _get_x(expr)
 
-        all_disc   = find_discontinuities_numerical(f, expr, expr_raw, X_LIM_L, X_LIM_R) if (DISC or ASIMP) else []
-        vasymps, removable = classify_discontinuities(f, expr, all_disc, Y_LIM_B, Y_LIM_T)
-        hasymps    = find_horizontal_asymptotes(f, expr, X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T) if ASIMP else []
+        disc_exact = {}
+        all_disc = (find_discontinuities_numerical(f, expr, expr_raw, X_LIM_L, X_LIM_R,
+                                                   exact_out=disc_exact)
+                    if (DISC or ASIMP) else [])
+        removable_exact = {}
+        vasymps, removable = classify_discontinuities(
+            f, expr, all_disc, Y_LIM_B, Y_LIM_T,
+            exact_pts=disc_exact, exact_out=removable_exact)
+        hasymps = (find_horizontal_asymptotes(f, expr, X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T)
+                   if ASIMP else [])
 
         disc_pts_x = [d[0] if isinstance(d, tuple) else d for d in all_disc]
 
@@ -1699,16 +2822,20 @@ def plot_function():
                 y_vals = y_vals.copy()
                 y_vals[outside] = np.nan
 
-        extrema      = find_extrema_numerical(f, x_vals, y_vals, Y_LIM_B, Y_LIM_T, disc_pts_x,
-                                              allow_pi=allow_pi, allow_e=allow_e) if EXTR else []
-        x_intercepts = find_x_intercepts(f, x_vals, y_vals, disc_pts_x,
-                                         allow_pi=allow_pi, allow_e=allow_e) if X_TAG else []
+        extrema      = (find_extrema_numerical(f, x_vals, y_vals, Y_LIM_B, Y_LIM_T, disc_pts_x)
+                        if EXTR else [])
+        x_intercepts = (find_x_intercepts(f, x_vals, y_vals, disc_pts_x)
+                        if X_TAG else [])
         y_intercept  = find_y_intercept(f, disc_pts_x, Y_LIM_B, Y_LIM_T) if Y_TAG else None
         # y-пересечение (x=0) скрываем, если 0 вне домена функции
         if y_intercept is not None and func_idx < len(FUNC_DOMAINS):
             d_from, d_to = FUNC_DOMAINS[func_idx]
             if not (d_from <= 0 <= d_to):
                 y_intercept = None
+
+        # Точные кандидаты (в режиме 'cached' могут быть отложены → [])
+        root_cands = cands(expr, x_sym, 'roots', X_LIM_L, X_LIM_R) if (X_TAG and x_intercepts) else []
+        crit_cands = cands(expr, x_sym, 'critical', X_LIM_L, X_LIM_R) if (EXTR and extrema) else []
 
         # Асимптоты — рисуем только новые (чтобы не дублировать)
         if ASIMP:
@@ -1727,19 +2854,22 @@ def plot_function():
         # Сохраняем для заливки после цикла
         func_data.append((f, y_vals, color))
         _dom = FUNC_DOMAINS[func_idx] if func_idx < len(FUNC_DOMAINS) else (float('-inf'), float('inf'))
-        curve_meta.append({'kind': 'func', 'color': color, 'f': f, 'domain': _dom})
+        curve_meta.append({'kind': 'func', 'color': color, 'f': f, 'domain': _dom,
+                           'expr': expr, 'x_sym': x_sym, 'disc': list(disc_pts_x)})
 
         # ── Точки разрыва ───────────────────────
         if DISC:
             for (dp, ylim) in removable:
+                dp_e, yl_e = removable_exact.get(dp, (None, None))
                 ax.plot(dp, ylim, 'o', color=color, markersize=5,
                         markerfacecolor='white', markeredgewidth=1.5, zorder=8)
                 if SHOW_VALUES:
+                    txt = label_xy(dp, ylim, dp_e, yl_e)
                     if abs(dp - y_axis_x) < ON_Y_AXIS_TOL:
-                        annotate_point(dp, ylim, f"({fmt2(dp)}, {fmt2(ylim)})",
+                        annotate_point(dp, ylim, txt,
                                        above=True, color=color, side=choose_side(dp, ylim, f))
                     else:
-                        annotate_point(dp, ylim, f"({fmt2(dp)}, {fmt2(ylim)})",
+                        annotate_point(dp, ylim, txt,
                                        above=(ylim >= x_axis_y), color=color)
 
         # ── Экстремумы ───────────────────────────
@@ -1747,11 +2877,14 @@ def plot_function():
             for ex, ey in extrema:
                 mark_point(ex, ey, color)
                 if SHOW_VALUES:
+                    ex_e = exact_crit(ex, expr, x_sym, crit_cands)
+                    ey_e = exact_y_of(expr, x_sym, ex_e) if ex_e is not None else None
+                    txt = label_xy(ex, ey, ex_e, ey_e)
                     if abs(ex - y_axis_x) < ON_Y_AXIS_TOL:
-                        annotate_point(ex, ey, f"({fmt2(ex)}, {fmt2(ey)})",
+                        annotate_point(ex, ey, txt,
                                        above=True, color=color, side=choose_side(ex, ey, f))
                     else:
-                        annotate_point(ex, ey, f"({fmt2(ex)}, {fmt2(ey)})",
+                        annotate_point(ex, ey, txt,
                                        above=(ey >= x_axis_y), color=color)
 
         # ── Пересечения с осью X ─────────────────
@@ -1759,22 +2892,52 @@ def plot_function():
             for xi in x_intercepts:
                 mark_point(xi, x_axis_y, color)
                 if SHOW_VALUES:
+                    xi_e = exact_root(xi, expr, x_sym, root_cands, 'root')
+                    txt = f"({coord(xi, xi_e)}, 0)"
                     if abs(xi - y_axis_x) < ON_Y_AXIS_TOL:
-                        annotate_point(xi, x_axis_y, f"({fmt2(xi)}, 0)",
+                        annotate_point(xi, x_axis_y, txt,
                                        above=True, color=color, side=choose_side(xi, x_axis_y, f))
                     else:
-                        annotate_point(xi, x_axis_y, f"({fmt2(xi)}, 0)",
+                        annotate_point(xi, x_axis_y, txt,
                                        above=True, color=color)
 
         # ── Пересечение с осью Y ─────────────────
-        removable_x = [r[0] for r in removable]
         is_removable_at_0 = any(abs(d - y_axis_x) < 1e-9 for d in removable_x)
         if Y_TAG and y_intercept is not None and not is_removable_at_0:
             mark_point(y_axis_x, y_intercept, color)
             if SHOW_VALUES:
-                annotate_point(y_axis_x, y_intercept, f"(0, {fmt2(y_intercept)})",
+                yi_e = exact_y_of(expr, x_sym, Integer(0))
+                annotate_point(y_axis_x, y_intercept, f"(0, {coord(y_intercept, yi_e)})",
                                above=True, color=color,
                                side=choose_side(y_axis_x, y_intercept, f))
+
+    for func_idx, func_str in enumerate(FUNCS):
+        color = CURVE_COLORS[func_idx % len(CURVE_COLORS)]
+        lw = CURVE_WIDTHS[func_idx] if func_idx < len(CURVE_WIDTHS) else 1.8
+        ls = CURVE_STYLES[func_idx] if func_idx < len(CURVE_STYLES) else "-"
+        n_before = len(func_data)
+        try:
+            if func_str is None or not str(func_str).strip():
+                raise _EmptyFunction()
+            kind, payload = _parse_equation_input(func_str)
+            if kind == 'vline':
+                draw_vline(func_idx, func_str, payload, color, lw, ls)
+            elif kind == 'implicit':
+                draw_implicit(func_idx, payload[0], payload[1], color, lw, ls)
+            else:
+                draw_func(func_idx, payload, color, lw, ls)
+        except _EmptyFunction:
+            pass
+        except SymbolicPending:
+            # Не должно происходить (все символьные вызовы обёрнуты), но на
+            # всякий случай: кривая пропускается до следующей перерисовки.
+            pass
+        except Exception as exc:
+            errors[func_idx] = _short_error(exc)
+        # placeholder, чтобы индексы заливки (f1/f2) совпадали с FUNCS
+        if len(func_data) == n_before:
+            func_data.append((None, None, color))
+            curve_meta.append({'kind': 'error', 'color': color})
 
     # ══════════════════════════════════════════════
     #  ПЕРЕСЕЧЕНИЯ МЕЖДУ ФУНКЦИЯМИ
@@ -1787,65 +2950,114 @@ def plot_function():
             b = (int(c1[4:6],16) + int(c2[4:6],16)) // 2
             return f'#{r:02x}{g:02x}{b:02x}'
 
-        def emit(ix, iy, pt_color, probe_f=None):
+        def emit(ix, iy, pt_color, probe_f=None, cx=None, cy=None):
             if not (Y_LIM_B <= iy <= Y_LIM_T and X_LIM_L <= ix <= X_LIM_R):
                 return
             mark_point(ix, iy, pt_color, markersize=5, zorder=11)
             if SHOW_VALUES:
                 above = iy >= x_axis_y
+                txt = label_xy(ix, iy, cx, cy)
                 if probe_f is not None and abs(ix - y_axis_x) < ON_Y_AXIS_TOL:
-                    annotate_point(ix, iy, f"({fmt2(ix)}, {fmt2(iy)})",
+                    annotate_point(ix, iy, txt,
                                    above=above, color=pt_color,
                                    side=choose_side(ix, iy, probe_f))
                 else:
-                    annotate_point(ix, iy, f"({fmt2(ix)}, {fmt2(iy)})",
+                    annotate_point(ix, iy, txt,
                                    above=above, color=pt_color)
+
+        def pair_zero(H1, H2, cx, cy):
+            """Точка (cx, cy) лежит на обеих неявных кривых."""
+            try:
+                sub = {_X_SYM: cx, _Y_SYM: cy}
+                for H in (H1, H2):
+                    v = H.subs(sub)
+                    if v == 0:
+                        continue
+                    if v.free_symbols:
+                        return False
+                    if abs(complex(v.evalf(30))) > 1e-9:
+                        return False
+                return True
+            except Exception:
+                return False
 
         for i in range(len(curve_meta)):
             for j in range(i + 1, len(curve_meta)):
                 mi, mj = curve_meta[i], curve_meta[j]
                 ki, kj = mi['kind'], mj['kind']
                 pt_color = blend(mi['color'], mj['color'])
+                try:
+                    # ── функция × функция (как раньше) ──
+                    if ki == 'func' and kj == 'func':
+                        yi = func_data[i][1]; yj = func_data[j][1]
+                        disc_ij = list(mi.get('disc', [])) + list(mj.get('disc', []))
+                        pts = find_intersections(mi['f'], mj['f'], x_vals, yi, yj, disc_ij)
+                        d_expr = mi['expr'] - mj['expr']
+                        xs_ = mi['x_sym']
+                        c_list = cands(d_expr, xs_, 'roots', X_LIM_L, X_LIM_R) if pts else []
+                        for ix, iy in pts:
+                            cx = exact_root(ix, d_expr, xs_, c_list, 'inter')
+                            cy = exact_y_of(mi['expr'], xs_, cx) if cx is not None else None
+                            if cx is not None and cy is None:
+                                cy = exact_y_of(mj['expr'], mj['x_sym'], cx)
+                            emit(ix, iy, pt_color, probe_f=mi['f'], cx=cx, cy=cy)
 
-                # ── функция × функция (как раньше) ──
-                if ki == 'func' and kj == 'func':
-                    yi = func_data[i][1]; yj = func_data[j][1]
-                    for ix, iy in find_intersections(mi['f'], mj['f'], x_vals, yi, yj, disc_pts_x):
-                        emit(ix, iy, pt_color, probe_f=mi['f'])
+                    # ── функция × неявная ──
+                    elif {ki, kj} == {'func', 'implicit'}:
+                        fm = mi if ki == 'func' else mj
+                        im_ = mi if ki == 'implicit' else mj
+                        if im_.get('h') is None:
+                            continue
+                        pts = intersect_func_implicit(fm['f'], im_['h'],
+                                                      X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T)
+                        g_expr = im_['H'].subs(_Y_SYM, fm['expr'])
+                        c_list = cands(g_expr, fm['x_sym'], 'roots', X_LIM_L, X_LIM_R) if pts else []
+                        for ix, iy in pts:
+                            cx = exact_root(ix, g_expr, fm['x_sym'], c_list, 'inter')
+                            cy = exact_y_of(fm['expr'], fm['x_sym'], cx) if cx is not None else None
+                            emit(ix, iy, pt_color, probe_f=fm['f'], cx=cx, cy=cy)
 
-                # ── функция × неявная ──
-                elif {ki, kj} == {'func', 'implicit'}:
-                    fm = mi if ki == 'func' else mj
-                    im = mi if ki == 'implicit' else mj
-                    if im.get('h') is None:
-                        continue
-                    for ix, iy in intersect_func_implicit(fm['f'], im['h'],
-                                                          X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T):
-                        emit(ix, iy, pt_color, probe_f=fm['f'])
+                    # ── неявная × неявная (в т.ч. две окружности) ──
+                    elif ki == 'implicit' and kj == 'implicit':
+                        if mi.get('h') is None or mj.get('h') is None:
+                            continue
+                        for ix, iy in intersect_implicit_implicit(mi['h'], mj['h'],
+                                                                  X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T):
+                            tag = ('ii', str(mi['H']), str(mj['H']))
+                            cx = identify_value(ix, cache_key=tag + ('x',))
+                            cy = identify_value(iy, cache_key=tag + ('y',))
+                            if cx is None or cy is None or not pair_zero(mi['H'], mj['H'], cx, cy):
+                                cx = cy = None
+                            emit(ix, iy, pt_color, cx=cx, cy=cy)
 
-                # ── неявная × неявная (в т.ч. две окружности) ──
-                elif ki == 'implicit' and kj == 'implicit':
-                    if mi.get('h') is None or mj.get('h') is None:
-                        continue
-                    for ix, iy in intersect_implicit_implicit(mi['h'], mj['h'],
-                                                              X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T):
-                        emit(ix, iy, pt_color)
-
-                # ── вертикаль × (функция или неявная) ──
-                elif 'vline' in (ki, kj):
-                    vm = mi if ki == 'vline' else mj
-                    om = mi if ki != 'vline' else mj
-                    cx = vm.get('x')
-                    if cx is None or not (X_LIM_L <= cx <= X_LIM_R):
-                        continue
-                    if om['kind'] == 'func':
-                        yv = _safe_scalar(om['f'], cx)
-                        if np.isfinite(yv):
-                            emit(cx, yv, pt_color, probe_f=om['f'])
-                    elif om['kind'] == 'implicit' and om.get('h') is not None:
-                        # на вертикали x=cx ищем корни H(cx, y)=0
-                        for yr in _scan_roots_1d(lambda t: om['h'](cx, t), Y_LIM_B, Y_LIM_T):
-                            emit(cx, yr, pt_color)
+                    # ── вертикаль × (функция или неявная) ──
+                    elif 'vline' in (ki, kj):
+                        vm = mi if ki == 'vline' else mj
+                        om = mi if ki != 'vline' else mj
+                        cx = vm.get('x')
+                        if cx is None or not (X_LIM_L <= cx <= X_LIM_R):
+                            continue
+                        cx_e = vm.get('x_exact')
+                        if om['kind'] == 'func':
+                            yv = _safe_scalar(om['f'], cx)
+                            if np.isfinite(yv):
+                                cy = exact_y_of(om['expr'], om['x_sym'], cx_e) if cx_e is not None else None
+                                emit(cx, yv, pt_color, probe_f=om['f'], cx=cx_e, cy=cy)
+                        elif om['kind'] == 'implicit' and om.get('h') is not None:
+                            # на вертикали x=cx ищем корни H(cx, y)=0
+                            Hc = om['H'].subs(_X_SYM, cx_e if cx_e is not None else cx)
+                            roots_y = _scan_roots_1d(lambda t: om['h'](cx, t), Y_LIM_B, Y_LIM_T)
+                            c_list = (cands(Hc, _Y_SYM, 'roots', Y_LIM_B, Y_LIM_T)
+                                      if (roots_y and cx_e is not None) else [])
+                            for yr in roots_y:
+                                cy = (exact_root(yr, Hc, _Y_SYM, c_list, 'inter')
+                                      if cx_e is not None else None)
+                                emit(cx, yr, pt_color, cx=cx_e, cy=cy)
+                except SymbolicPending:
+                    pass
+                except Exception:
+                    # Ошибка расчёта пересечений одной пары не должна ронять график
+                    pass
 
     def lighten_color(hex_color, factor=0.45):
         hex_color = hex_color.lstrip('#')
@@ -1947,76 +3159,92 @@ def plot_function():
                         linewidth=lw, zorder=4)
 
     for fill_entry in FILL:
-        # Формат: (f1, f2, x_от, x_до, стиль, границы, плотность)
-        f1_idx, f2, fx_from, fx_to, fill_style = fill_entry[:5]
-        show_borders = fill_entry[5] if len(fill_entry) > 5 else True
-        density      = fill_entry[6] if len(fill_entry) > 6 else 0.01
+        try:
+            # Формат: (f1, f2, x_от, x_до, стиль, границы, плотность)
+            f1_idx, f2, fx_from, fx_to, fill_style = fill_entry[:5]
+            show_borders = fill_entry[5] if len(fill_entry) > 5 else True
+            density      = fill_entry[6] if len(fill_entry) > 6 else 0.01
 
-        if f1_idx >= len(func_data):
-            continue
-
-        f1_func, y1_all, color1 = func_data[f1_idx]
-        # Заливка относительно вертикальной линии не имеет смысла — пропускаем.
-        if f1_func is None:
-            continue
-
-        fx_from = max(fx_from, X_LIM_L)
-        fx_to   = min(fx_to,   X_LIM_R)
-        if fx_from >= fx_to:
-            continue
-
-        mask = (x_vals >= fx_from) & (x_vals <= fx_to)
-        xf   = x_vals[mask]
-
-        y1_fill = np.array([_safe_val(f1_func, x) for x in xf])
-        y1_fill = np.clip(y1_fill, Y_LIM_B, Y_LIM_T)
-
-        if isinstance(f2, str) or f2 is None:
-            y2_fill = np.zeros_like(y1_fill)
-            fill_color = lighten_color(color1)
-        else:
-            if f2 >= len(func_data):
+            if f1_idx >= len(func_data):
                 continue
-            f2_func = func_data[f2][0]
-            if f2_func is None:
+
+            f1_func, y1_all, color1 = func_data[f1_idx]
+            # Заливка относительно вертикальной линии не имеет смысла — пропускаем.
+            if f1_func is None:
                 continue
-            y2_fill = np.array([_safe_val(f2_func, x) for x in xf])
-            y2_fill = np.clip(y2_fill, Y_LIM_B, Y_LIM_T)
-            fill_color = lighten_color(color1)
 
-        valid = np.isfinite(y1_fill) & np.isfinite(y2_fill)
+            fx_from = max(fx_from, X_LIM_L)
+            fx_to   = min(fx_to,   X_LIM_R)
+            if fx_from >= fx_to:
+                continue
 
-        # Рисуем штриховку реальными линиями
-        draw_fill_lines(ax, xf, y1_fill, y2_fill, valid, fill_style,
-                        fill_color, X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T,
-                        density=density)
+            mask = (x_vals >= fx_from) & (x_vals <= fx_to)
+            xf   = x_vals[mask]
+            if len(xf) < 2:
+                continue
 
-        # Вертикальные линии-границы по краям
-        if show_borders:
-            for xb in [fx_from, fx_to]:
-                y1b = _safe_val(f1_func, xb)
-                y1b = float(np.clip(y1b, Y_LIM_B, Y_LIM_T)) if np.isfinite(y1b) else None
-                if isinstance(f2, str) or f2 is None:
-                    y2b = 0.0
-                else:
-                    y2b = _safe_val(func_data[f2][0], xb)
-                    y2b = float(np.clip(y2b, Y_LIM_B, Y_LIM_T)) if np.isfinite(y2b) else None
-                if y1b is not None and y2b is not None:
-                    ax.plot([xb, xb], [y1b, y2b], color=fill_color,
-                            linewidth=1.2, zorder=5)
+            y1_fill = _eval_array(f1_func, xf)
+            y1_fill = np.clip(y1_fill, Y_LIM_B, Y_LIM_T)
 
-    global _active_free_text_manager
+            if isinstance(f2, str) or f2 is None:
+                y2_fill = np.zeros_like(y1_fill)
+                fill_color = lighten_color(color1)
+            else:
+                if f2 >= len(func_data):
+                    continue
+                f2_func = func_data[f2][0]
+                if f2_func is None:
+                    continue
+                y2_fill = _eval_array(f2_func, xf)
+                y2_fill = np.clip(y2_fill, Y_LIM_B, Y_LIM_T)
+                fill_color = lighten_color(color1)
+
+            valid = np.isfinite(y1_fill) & np.isfinite(y2_fill)
+
+            # Рисуем штриховку реальными линиями
+            draw_fill_lines(ax, xf, y1_fill, y2_fill, valid, fill_style,
+                            fill_color, X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T,
+                            density=density)
+
+            # Вертикальные линии-границы по краям
+            if show_borders:
+                for xb in [fx_from, fx_to]:
+                    y1b = _safe_val(f1_func, xb)
+                    y1b = float(np.clip(y1b, Y_LIM_B, Y_LIM_T)) if np.isfinite(y1b) else None
+                    if isinstance(f2, str) or f2 is None:
+                        y2b = 0.0
+                    else:
+                        y2b = _safe_val(func_data[f2][0], xb)
+                        y2b = float(np.clip(y2b, Y_LIM_B, Y_LIM_T)) if np.isfinite(y2b) else None
+                    if y1b is not None and y2b is not None:
+                        ax.plot([xb, xb], [y1b, y2b], color=fill_color,
+                                linewidth=1.2, zorder=5)
+        except Exception:
+            # Некорректная запись заливки не должна ронять график
+            continue
+
     _active_free_text_manager = FreeTextManager(fig, ax, font_size=_FS)
 
-    global _active_axis_label_manager
     _active_axis_label_manager = AxisLabelManager(
         fig, ax,
         artists={'x': _axis_label_x, 'y': _axis_label_y},
         home_offsets=_axis_home_offsets,
         default_fontsize=AXIS_FS)
 
-    plt.tight_layout()
-    plt.show()
+    if standalone:
+        plt.tight_layout()
+        plt.show()
+    else:
+        try:
+            fig.tight_layout()
+        except Exception:
+            pass
+
+    return {'ax': ax, 'errors': errors, 'pending': bool(_DRAW_STATE['pending'])}
+
+
+class _EmptyFunction(Exception):
+    """Пустая строка функции — тихо пропускается."""
 
 
 if __name__ == "__main__":

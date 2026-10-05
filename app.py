@@ -200,6 +200,8 @@ class Keypad(tk.Frame):
          ("⌫", "backspace", "удалить"), ("C", "clear", "очистить поле")],
     ]
 
+    KEY_MIN_W = 46   # минимальная ширина кнопки, px
+
     def __init__(self, parent, on_token, **kw):
         super().__init__(parent, bg=CARD_BG, **kw)
         self.on_token = on_token
@@ -232,21 +234,27 @@ class Keypad(tk.Frame):
         for r, row in enumerate(rows):
             for c, (label, token, tip) in enumerate(row):
                 if token is None:
-                    tk.Frame(parent, bg=CARD_BG, width=46, height=30).grid(row=r, column=c)
+                    tk.Frame(parent, bg=CARD_BG, width=self.KEY_MIN_W, height=28).grid(row=r, column=c)
                     continue
                 is_digit = numeric and (label.isdigit() or label == ".")
                 bg = KEY_BG2 if is_digit else KEY_BG
                 fnt = (UI_FONT, 10, "bold") if is_digit else (UI_FONT, 10)
+                if len(label) > 4:            # arcsin, arccos… — чуть мельче, чтобы не слипались
+                    fnt = (UI_FONT, 9)
                 if token == "__page__":
                     label = "fn ▸" if self._page == 0 else "◂ back"
                     fnt = (UI_FONT, 9)
+                # width=1 + minsize колонки: кнопки одинаковой ширины в пикселях
+                # независимо от шрифта (Segoe UI на Windows, DejaVu на Linux);
+                # длинные подписи (arcsin, logₐ) сами расширяют свою колонку.
                 b = tk.Button(parent, text=label, bg=bg, fg=KEY_FG, font=fnt,
-                              relief="flat", bd=0, cursor="hand2", width=5, pady=3,
+                              relief="flat", bd=0, cursor="hand2", width=1, padx=4, pady=3,
                               activebackground="#dde3ea", activeforeground=KEY_FG,
                               highlightthickness=1, highlightbackground=BORDER,
                               takefocus=0,
                               command=lambda t=token: self._press(t))
                 b.grid(row=r, column=c, padx=1, pady=1, sticky="nsew")
+                parent.grid_columnconfigure(c, minsize=self.KEY_MIN_W)
                 if tip:
                     Tooltip(b, tip)
 
