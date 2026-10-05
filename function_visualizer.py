@@ -2770,7 +2770,8 @@ def plot_function(fig=None):
     # 'equal' — квадратные клетки ценой «усадки» рамки осей.
     ax.set_aspect('auto')
     try:
-        fig.subplots_adjust(left=0.03, right=0.97, bottom=0.03, top=0.97)
+        # Границы осей совпадают с границами холста: полей нет вовсе
+        fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
     except Exception:
         pass
     # Размер осей в пикселях — для штриховки под 45° на ЭКРАНЕ и смещений
@@ -2812,14 +2813,16 @@ def plot_function(fig=None):
                 arrowprops=dict(arrowstyle='->', color=LABEL_COLOR,
                                 lw=1.2, mutation_scale=12), zorder=4)
 
+    # Подписи осей — ВНУТРИ области построения (у полей нулевая ширина):
+    # «x» над стрелкой у правого края, «y» справа от стрелки у верхнего.
     _axis_label_x = ax.text(X_LIM_R, x_axis_y, "$x$" if MATHTEXT_LABELS else "x",
-                ha='left', va='center', fontsize=AXIS_FS, color=LABEL_COLOR,
+                ha='right', va='bottom', fontsize=AXIS_FS, color=LABEL_COLOR,
                 clip_on=False, zorder=6)
     _axis_label_y = ax.text(y_axis_x, Y_LIM_T, "$y$" if MATHTEXT_LABELS else "y",
-                ha='center', va='bottom', fontsize=AXIS_FS, color=LABEL_COLOR,
+                ha='left', va='top', fontsize=AXIS_FS, color=LABEL_COLOR,
                 clip_on=False, zorder=6)
-    # Домашние смещения (в пунктах) — то, что раньше было в xytext.
-    _axis_home_offsets = {'x': (6.0, 0.0), 'y': (0.0, 6.0)}
+    # Домашние смещения (в пунктах) от концов стрелок.
+    _axis_home_offsets = {'x': (-5.0, 4.0), 'y': (5.0, -4.0)}
 
     # ── Деления на осях ─────────────────────────
     def make_ticks(lim_lo, lim_hi, step):

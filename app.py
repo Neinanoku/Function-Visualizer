@@ -1138,7 +1138,10 @@ class App(tk.Tk):
         w = self.canvas.get_tk_widget()
         w.configure(bg="white", highlightthickness=0)
         w.pack(fill="both", expand=True)
-        w.bind("<Configure>", self._on_canvas_resize)
+        # add="+": НЕ затирать собственный обработчик <Configure> бэкенда
+        # matplotlib (он подгоняет размер фигуры под виджет) — иначе при
+        # увеличении окна фигура остаётся прежней и справа/снизу белое поле.
+        w.bind("<Configure>", self._on_canvas_resize, add="+")
         self._preview = FramePreview(self.canvas)
 
         self.status = tk.Label(parent, text="", bg=APP_BG, fg=SUBTEXT,
@@ -1485,13 +1488,15 @@ class App(tk.Tk):
         self._tl_job = self.after(200, self._relayout)
 
     def _relayout(self):
+        """После изменения размера холста — полная перерисовка: штриховка и
+        смещения подписей считаются от размера осей в пикселях."""
         self._tl_job = None
         try:
             if self._preview is not None:
                 self._preview.hide()
-            self.canvas.draw_idle()
         except Exception:
             pass
+        self.schedule_redraw(delay=1)
 
     # ══════════════════════════════════════════════════════════
     #  МЫШЬ НА ГРАФИКЕ: зум колесом, панорамирование перетаскиванием
