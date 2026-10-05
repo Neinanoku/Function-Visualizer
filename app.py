@@ -227,10 +227,10 @@ def has_local(text):
 
 STRINGS_HE = {
     # окно / карточки
-    "Function Visualizer — Ariadna": "מדמה פונקציות — Ariadna",
+    "Function Visualizer - Ariadna": "מדמה פונקציות - Ariadna",
     "Functions": "פונקציות", "+ Add function": "+ הוסף פונקציה",
     "View Window": "חלון תצוגה", "X:  from / to": "X:  מ / עד", "Y:  from / to": "Y:  מ / עד",
-    "Tip: mouse wheel over the graph zooms, drag pans.": "טיפ: גלגלת העכבר מעל הגרף — זום, גרירה — הזזה.",
+    "Tip: mouse wheel over the graph zooms, drag pans.": "טיפ: גלגלת העכבר מעל הגרף - זום, גרירה - הזזה.",
     "Grid": "סריג", "Show grid": "הצג סריג", "  Step X:": "צעד X:", "Step Y:": "צעד Y:",
     "Display on Graph": "הצגה על הגרף",
     "Asymptotes": "אסימפטוטות", "Holes": "חורים", "Extrema": "קיצון",
@@ -238,13 +238,13 @@ STRINGS_HE = {
     "Show values": "הצגת ערכים", "Hide X labels": "הסתר תוויות X", "Hide Y labels": "הסתר תוויות Y",
     "Label size:": "גודל תווית:",
     "Area Fill": "צביעת שטח", "+ Add fill": "+ הוסף צביעה",
-    "f1 / f2 — function indices (0, 1, …) or 'x' for the X axis":
-        "f1 / f2 — אינדקסי פונקציות (0, 1, …) או 'x' עבור ציר X",
+    "f1 / f2 - function indices (0, 1, …) or 'x' for the X axis":
+        "f1 / f2 - אינדקסי פונקציות (0, 1, …) או 'x' עבור ציר X",
     "Graph Labels": "תוויות על הגרף",
     "Double-click empty space on the graph to add a label. Drag to move, scroll to rotate, "
     "right-click for options. Point labels can be dragged too.":
-        "לחיצה כפולה על מקום ריק בגרף מוסיפה תווית. גרירה — הזזה, גלגלת — סיבוב, "
-        "לחיצה ימנית — אפשרויות. גם תוויות נקודות ניתנות לגרירה.",
+        "לחיצה כפולה על מקום ריק בגרף מוסיפה תווית. גרירה - הזזה, גלגלת - סיבוב, "
+        "לחיצה ימנית - אפשרויות. גם תוויות נקודות ניתנות לגרירה.",
     "Clear all labels": "נקה את כל התוויות", "Reset point labels": "אפס תוויות נקודות",
     "  Save image…": "שמור תמונה…", "Reset view": "איפוס תצוגה",
     "Save project": "שמור פרויקט", "Open project": "פתח פרויקט",
@@ -264,14 +264,14 @@ STRINGS_HE = {
     "Project loaded: {path}": "הפרויקט נטען: {path}",
     # статус
     "Ready": "מוכן", "Refining labels (symbolic analysis)…": "מעדן תוויות (ניתוח סימבולי)…",
-    "Some functions are incomplete or invalid — hover the red field":
-        "חלק מהפונקציות לא שלמות או שגויות — העבר את העכבר מעל השדה האדום",
-    "Symbolic analysis timed out — some labels stay numeric":
-        "הניתוח הסימבולי חרג מהזמן — חלק מהתוויות יישארו מספריות",
-    "Plot error — previous graph restored (details: {log})":
-        "שגיאת שרטוט — הגרף הקודם שוחזר (פרטים: {log})",
-    "Zoom-out limit for the current grid step — increase Step X / Step Y":
-        "הגבלת הרחקה עבור צעד הסריג הנוכחי — הגדל את צעד X / Y",
+    "Some functions are incomplete or invalid - hover the red field":
+        "חלק מהפונקציות לא שלמות או שגויות - העבר את העכבר מעל השדה האדום",
+    "Symbolic analysis timed out - some labels stay numeric":
+        "הניתוח הסימבולי חרג מהזמן - חלק מהתוויות יישארו מספריות",
+    "Plot error - previous graph restored (details: {log})":
+        "שגיאת שרטוט - הגרף הקודם שוחזר (פרטים: {log})",
+    "Zoom-out limit for the current grid step - increase Step X / Step Y":
+        "הגבלת הרחקה עבור צעד הסריג הנוכחי - הגדל את צעד X / Y",
     "visible x": "נראה x", "visible y": "נראה y",
     # проверка настроек
     "{what}: cannot read '{val}'": "{what}: לא ניתן לקרוא '{val}'",
@@ -314,7 +314,7 @@ ERRORS_HE = {
     "Syntax error": "שגיאת תחביר", "Invalid expression": "ביטוי לא תקין",
     "Division by zero": "חלוקה באפס",
     "Undefined value (division by zero or log base 1?)": "ערך לא מוגדר (חלוקה באפס או לוג בבסיס 1?)",
-    "equation is an identity — every point satisfies it": "המשוואה היא זהות — כל נקודה מקיימת אותה",
+    "equation is an identity - every point satisfies it": "המשוואה היא זהות - כל נקודה מקיימת אותה",
     "equation has no solutions (contradiction)": "למשוואה אין פתרונות (סתירה)",
     "empty expression": "ביטוי ריק", "exponent without base": "מעריך ללא בסיס",
     "subscript is only allowed as a log base": "אינדקס תחתון מותר רק כבסיס לוגריתם",
@@ -337,11 +337,11 @@ _ERR_PATTERNS_HE = [
 
 STRINGS_RU = {
     # окно / карточки
-    "Function Visualizer — Ariadna": "Визуализатор функций — Ariadna",
+    "Function Visualizer - Ariadna": "Визуализатор функций - Ariadna",
     "Functions": "Функции", "+ Add function": "+ Добавить функцию",
     "View Window": "Окно просмотра", "X:  from / to": "X:  от / до", "Y:  from / to": "Y:  от / до",
     "Tip: mouse wheel over the graph zooms, drag pans.":
-        "Подсказка: колесо мыши над графиком — масштаб, перетаскивание — сдвиг.",
+        "Подсказка: колесо мыши над графиком - масштаб, перетаскивание - сдвиг.",
     "Grid": "Сетка", "Show grid": "Показывать сетку", "  Step X:": "  Шаг X:", "Step Y:": "Шаг Y:",
     "Display on Graph": "Показывать на графике",
     "Asymptotes": "Асимптоты", "Holes": "Выколотые точки", "Extrema": "Экстремумы",
@@ -350,13 +350,13 @@ STRINGS_RU = {
     "Show values": "Показывать значения", "Hide X labels": "Скрыть подписи X", "Hide Y labels": "Скрыть подписи Y",
     "Label size:": "Размер подписей:",
     "Area Fill": "Заливка области", "+ Add fill": "+ Добавить заливку",
-    "f1 / f2 — function indices (0, 1, …) or 'x' for the X axis":
-        "f1 / f2 — номера функций (0, 1, …) или 'x' для оси X",
+    "f1 / f2 - function indices (0, 1, …) or 'x' for the X axis":
+        "f1 / f2 - номера функций (0, 1, …) или 'x' для оси X",
     "Graph Labels": "Подписи на графике",
     "Double-click empty space on the graph to add a label. Drag to move, scroll to rotate, "
     "right-click for options. Point labels can be dragged too.":
-        "Двойной щелчок по пустому месту графика добавляет подпись. Перетаскивание — перемещение, "
-        "колесо — поворот, правая кнопка — меню. Подписи точек тоже можно перетаскивать.",
+        "Двойной щелчок по пустому месту графика добавляет подпись. Перетаскивание - перемещение, "
+        "колесо - поворот, правая кнопка - меню. Подписи точек тоже можно перетаскивать.",
     "Clear all labels": "Удалить все подписи", "Reset point labels": "Сбросить подписи точек",
     "  Save image…": "  Сохранить картинку…", "Reset view": "Сбросить вид",
     "Save project": "Сохранить проект", "Open project": "Открыть проект",
@@ -376,14 +376,14 @@ STRINGS_RU = {
     "Project loaded: {path}": "Проект загружен: {path}",
     # статус
     "Ready": "Готово", "Refining labels (symbolic analysis)…": "Уточняю подписи (символьный анализ)…",
-    "Some functions are incomplete or invalid — hover the red field":
-        "Некоторые функции не дописаны или ошибочны — наведите мышь на красное поле",
-    "Symbolic analysis timed out — some labels stay numeric":
-        "Символьный анализ не уложился в отведённое время — часть подписей останется числовой",
-    "Plot error — previous graph restored (details: {log})":
-        "Ошибка построения — восстановлен предыдущий график (подробности: {log})",
-    "Zoom-out limit for the current grid step — increase Step X / Step Y":
-        "Предел отдаления для текущего шага сетки — увеличьте шаг X / Y",
+    "Some functions are incomplete or invalid - hover the red field":
+        "Некоторые функции не дописаны или ошибочны - наведите мышь на красное поле",
+    "Symbolic analysis timed out - some labels stay numeric":
+        "Символьный анализ не уложился в отведённое время - часть подписей останется числовой",
+    "Plot error - previous graph restored (details: {log})":
+        "Ошибка построения - восстановлен предыдущий график (подробности: {log})",
+    "Zoom-out limit for the current grid step - increase Step X / Step Y":
+        "Предел отдаления для текущего шага сетки - увеличьте шаг X / Y",
     "visible x": "видно x", "visible y": "видно y",
     # проверка настроек
     "{what}: cannot read '{val}'": "{what}: не удаётся прочитать '{val}'",
@@ -426,7 +426,7 @@ ERRORS_RU = {
     "Division by zero": "Деление на ноль",
     "Undefined value (division by zero or log base 1?)":
         "Неопределённое значение (деление на ноль или логарифм по основанию 1?)",
-    "equation is an identity — every point satisfies it": "уравнение — тождество: ему удовлетворяет каждая точка",
+    "equation is an identity - every point satisfies it": "уравнение - тождество: ему удовлетворяет каждая точка",
     "equation has no solutions (contradiction)": "у уравнения нет решений (противоречие)",
     "empty expression": "пустое выражение", "exponent without base": "показатель степени без основания",
     "subscript is only allowed as a log base": "нижний индекс допустим только как основание логарифма",
@@ -1348,7 +1348,7 @@ class App(tk.Tk):
         _resolve_ui_font(self)
         self._init_dpi_scale()
         apply_engine_language()
-        self.title(he_display(T("Function Visualizer — Ariadna")))
+        self.title(he_display(T("Function Visualizer - Ariadna")))
         self.configure(bg=APP_BG)
         self.resizable(True, True)
         self.minsize(_px(980), _px(640))
@@ -1636,7 +1636,7 @@ class App(tk.Tk):
         # ── Fill ─────────────────────────────────────────────
         self.fill_card = card(p, "Area Fill")
         card_pack(self.fill_card, fill="x", padx=12, pady=4)
-        make_label(self.fill_card, "f1 / f2 — function indices (0, 1, …) or 'x' for the X axis",
+        make_label(self.fill_card, "f1 / f2 - function indices (0, 1, …) or 'x' for the X axis",
                    size=8, bg=CARD_BG).pack(anchor=anchor_start(), padx=10)
         self.fill_list = tk.Frame(self.fill_card, bg=PANEL_BG)
         self.fill_list.pack(fill="x", padx=8, pady=4)
@@ -1920,7 +1920,7 @@ class App(tk.Tk):
                 result = fv.plot_function(self.fig)
             except Exception:
                 log_exception("plot_function")
-                self._set_status(T("Plot error — previous graph restored (details: {log})", log=ERROR_LOG),
+                self._set_status(T("Plot error - previous graph restored (details: {log})", log=ERROR_LOG),
                                  ERR_COLOR)
                 self._restore_last_good()
                 return
@@ -1945,7 +1945,7 @@ class App(tk.Tk):
                 self._submit_jobs(fv.take_pending_jobs())
                 self._set_status(T("Refining labels (symbolic analysis)…"))
             elif errors or self._incomplete_rows:
-                self._set_status(T("Some functions are incomplete or invalid — hover the red field"),
+                self._set_status(T("Some functions are incomplete or invalid - hover the red field"),
                                  ERR_COLOR)
             else:
                 self._set_status(T("Ready") + self._visible_range_note(result.get('ax')))
@@ -2056,7 +2056,7 @@ class App(tk.Tk):
                 self._running_keys.difference_update(keys)
                 self._active_batch = None
             self._start_worker_thread()
-            self._set_status(T("Symbolic analysis timed out — some labels stay numeric"), ERR_COLOR)
+            self._set_status(T("Symbolic analysis timed out - some labels stay numeric"), ERR_COLOR)
             self.schedule_redraw()
 
         self._poll_job = self.after(150, self._poll_worker)
@@ -2168,7 +2168,7 @@ class App(tk.Tk):
         try:
             xg = fv.parse_number(self.xgrid_e.get()); yg = fv.parse_number(self.ygrid_e.get())
             if (nxr - nxl) / xg > MAX_GRID_LINES or (nyt - nyb) / yg > MAX_GRID_LINES:
-                self._set_status(T("Zoom-out limit for the current grid step — increase Step X / Step Y"),
+                self._set_status(T("Zoom-out limit for the current grid step - increase Step X / Step Y"),
                                  ERR_COLOR)
                 return
         except Exception:
@@ -2404,8 +2404,12 @@ class App(tk.Tk):
 #  ВЫБОР ЯЗЫКА ПРИ ЗАПУСКЕ
 # ═════════════════════════════════════════════════════════════
 
+VERSION = "4.0"
+
 # (код, название на самом языке, клавиша)
 LANGUAGES = [("en", "English", "1"), ("he", "עברית", "2"), ("ru", "Русский", "3")]
+# Ширина логотипа в стартовом окне (при 96 dpi) — он задаёт ширину карточки
+CHOOSER_LOGO_WIDTH = 300
 _CHOOSER_PROMPTS = [("en", "Choose language"), ("he", "בחר שפה"), ("ru", "Выберите язык")]
 
 
@@ -2438,9 +2442,20 @@ class LanguageChooser(tk.Tk):
         outer.pack(padx=_px(18), pady=_px(18))
         box = tk.Frame(outer, bg=CARD_BG, padx=_px(28), pady=_px(18))
         box.pack()
+        # Логотип во всю ширину карточки (крупнее, чем в шапке главного окна)
+        self._logo_img = None
+        try:
+            from PIL import Image, ImageTk
+            img = Image.open(_resource_path("ariadna-logo1-trnsp.png")).convert("RGBA")
+            w = _px(CHOOSER_LOGO_WIDTH)
+            h = max(1, int(img.height * w / img.width))
+            self._logo_img = ImageTk.PhotoImage(img.resize((w, h), Image.LANCZOS))
+            tk.Label(box, image=self._logo_img, bg=CARD_BG).pack(pady=(0, _px(8)))
+        except Exception:
+            pass
         tk.Label(box, text="Function Visualizer", bg=CARD_BG, fg=TEXT,
                  font=(UI_FONT, 15, "bold")).pack(pady=(0, _px(2)))
-        tk.Label(box, text="ariadna", bg=CARD_BG, fg=ACCENT,
+        tk.Label(box, text=f"v{VERSION}", bg=CARD_BG, fg=SUBTEXT,
                  font=(UI_FONT, 10, "bold")).pack(pady=(0, _px(10)))
         for code, prompt in _CHOOSER_PROMPTS:
             tk.Label(box, text=he_display(prompt), bg=CARD_BG, fg=SUBTEXT,

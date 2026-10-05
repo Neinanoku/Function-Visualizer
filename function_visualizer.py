@@ -3264,7 +3264,7 @@ def _plot_function_impl(fig=None):
         if H_const or Zf.size == 0 or np.all(Zf == 0.0):
             if H_const and H_sym != 0:
                 raise ValueError("equation has no solutions (contradiction)")
-            raise ValueError("equation is an identity — every point satisfies it")
+            raise ValueError("equation is an identity - every point satisfies it")
         # Рисуем линию уровня 0 => кривую F−G=0
         # linestyles matplotlib ожидает 'solid'/'dashed'/'dotted'
         ls_map = {'-': 'solid', '--': 'dashed', ':': 'dotted', '-.': 'dashdot'}
