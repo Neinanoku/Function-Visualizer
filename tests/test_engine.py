@@ -772,10 +772,10 @@ def test_mathtext_labels_render():
 
 def test_font_presets_apply():
     import matplotlib.pyplot as plt
-    for name in ("times", "latex", "serif", "sans", "century"):
+    for name in ("schola", "times", "latex", "serif", "sans", "century"):
         fv.apply_font_preset(name)
         assert fv.GRAPH_FONT == name
         assert plt.rcParams['mathtext.fontset'] in ("stix", "cm", "dejavuserif", "dejavusans", "custom")
     fv.apply_font_preset("nonsense")
-    assert fv.GRAPH_FONT == "times"            # неизвестное имя → пресет по умолчанию
-    fv.apply_font_preset("times")
+    assert fv.GRAPH_FONT == "schola"           # неизвестное имя → пресет по умолчанию
+    fv.apply_font_preset("schola")

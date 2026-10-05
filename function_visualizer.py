@@ -41,18 +41,22 @@ from scipy.optimize import brentq, minimize_scalar
 # Windows; Carlito — его метрический аналог в Linux; DejaVu Sans — везде).
 # matplotlib принимает список семейств и берёт первый доступный.
 # ── Шрифт графика и формат подписей ───────────────────────────
-# GRAPH_FONT — пресет шрифта (см. FONT_PRESETS): 'times' — Times New Roman
-# (шрифт программы) + математика STIX (Times-совместимая), 'century' — Century
-# Schoolbook, 'latex' — Computer Modern, 'serif' — DejaVu Serif, 'sans' —
-# Calibri/DejaVu Sans (старый вид).
+# GRAPH_FONT — пресет шрифта (см. FONT_PRESETS): 'schola' — TeX Gyre Schola
+# (свободный клон Century Schoolbook, файлы лежат в папке fonts/ и регистрируются
+# приложением при старте), 'century' — Century Schoolbook, 'times' — Times New
+# Roman + STIX, 'latex' — Computer Modern, 'serif' — DejaVu Serif, 'sans' — Calibri.
 # MATHTEXT_LABELS — подписи точек/делений через mathtext matplotlib:
 # \sqrt{5}, \frac{\pi}{2} рисуются как настоящие корни и дроби; False —
 # обычные unicode-строки (√5, π/2).
-GRAPH_FONT = 'times'
+GRAPH_FONT = 'schola'
 MATHTEXT_LABELS = True
 
 FONT_PRESETS = {
     # имя: (список семейств для обычного текста, mathtext.fontset)
+    # Два имени Schola: «TeX Gyre Schola» (typographic family, fontconfig/Linux)
+    # и «TeXGyreSchola» (legacy family из name-таблицы, Windows GDI).
+    'schola':  (['TeX Gyre Schola', 'TeXGyreSchola', 'Century Schoolbook', 'Times New Roman',
+                 'Liberation Serif', 'DejaVu Serif', 'serif'], 'custom'),
     'times':   (['Times New Roman', 'Cambria', 'Liberation Serif', 'DejaVu Serif', 'serif'], 'stix'),
     'latex':   (['CMU Serif', 'Latin Modern Roman', 'Times New Roman', 'Liberation Serif',
                  'DejaVu Serif', 'serif'], 'cm'),
@@ -76,8 +80,8 @@ def apply_font_preset(name=None):
     """Применяет пресет шрифта к rcParams (вызывается при смене настройки)."""
     global GRAPH_FONT
     name = name or GRAPH_FONT
-    families, fontset = FONT_PRESETS.get(name, FONT_PRESETS['times'])
-    GRAPH_FONT = name if name in FONT_PRESETS else 'times'
+    families, fontset = FONT_PRESETS.get(name, FONT_PRESETS['schola'])
+    GRAPH_FONT = name if name in FONT_PRESETS else 'schola'
     plt.rcParams['font.family'] = list(families)
     if fontset == 'custom':
         # «Свой» шрифт для математики: берём первое установленное семейство
@@ -86,7 +90,7 @@ def apply_font_preset(name=None):
         fam = next((f for f in families if f not in ('serif', 'sans-serif')
                     and _font_available(f)), None)
         if fam is None or fam not in families[:3]:
-            # нет ни Century Schoolbook, ни его клона — Times-подобный STIX
+            # нет ни Schola, ни Century Schoolbook — Times-подобный STIX
             fontset = 'stix'
         else:
             plt.rcParams['mathtext.fontset'] = 'custom'

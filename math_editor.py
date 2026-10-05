@@ -1092,7 +1092,8 @@ class _Parser:
 #  ВИД: РАСКЛАДКА (BOXES)
 # ═════════════════════════════════════════════════════════════
 
-PREFERRED_FONTS = ["Times New Roman", "Liberation Serif", "Cambria", "DejaVu Serif"]
+PREFERRED_FONTS = ["TeX Gyre Schola", "TeXGyreSchola", "Century Schoolbook", "Times New Roman",
+                   "Liberation Serif", "Cambria", "DejaVu Serif"]
 
 # Пропорции (в долях размера шрифта px), откалиброваны по Liberation Serif /
 # Times New Roman: ось дроби ≈ центр знака «−», x-height ≈ 0.47 em,

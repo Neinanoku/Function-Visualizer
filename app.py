@@ -41,10 +41,52 @@ matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
+# ── Шрифты, поставляемые с программой (папка fonts/) ─────────
+def _bundled_font_dir():
+    base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, "fonts")
+
+
+def _register_bundled_fonts():
+    """
+    TeX Gyre Schola (свободный клон Century Schoolbook) лежит в fonts/ и не
+    требует установки: для matplotlib файлы добавляются в его менеджер шрифтов,
+    для Tk на Windows — регистрируются как приватные шрифты процесса через
+    GDI (AddFontResourceExW, FR_PRIVATE). На Linux/macOS Tk берёт шрифт из
+    системы, если он установлен (пакет fonts-texgyre), иначе — запасной.
+    """
+    import glob
+    paths = sorted(glob.glob(os.path.join(_bundled_font_dir(), "*.otf")) +
+                   glob.glob(os.path.join(_bundled_font_dir(), "*.ttf")))
+    if not paths:
+        return []
+    try:
+        from matplotlib import font_manager
+        for p in paths:
+            try:
+                font_manager.fontManager.addfont(p)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            FR_PRIVATE = 0x10
+            for p in paths:
+                ctypes.windll.gdi32.AddFontResourceExW(p, FR_PRIVATE, 0)
+        except Exception:
+            pass
+    return paths
+
+
+BUNDLED_FONTS = _register_bundled_fonts()
+
 # ── Импортируем движок и редактор ────────────────────────────
 # (в exe они лежат как обычные модули PyInstaller — см. generate_spec.py)
 import function_visualizer as fv
 from math_editor import MathEditor, MathModel, IncompleteExpression
+fv.apply_font_preset()          # пресет пересчитывается уже с учётом fonts/
 
 
 # ═════════════════════════════════════════════════════════════
@@ -76,11 +118,13 @@ ZOOM_DELAY_MS    = 120        # после колеса мыши (предпро
 SYMBOLIC_TIMEOUT_S = 20.0     # сторож: пачка символьных заданий дольше этого — считается зависшей
 MAX_GRID_LINES   = 2000       # span / step не больше этого (иначе сетка «съедает» рисунок)
 
-# Шрифт интерфейса (панель, клавиатура, подсказки): Times New Roman;
-# если его нет на машине — ближайшие замены. Имя уточняется при старте
-# (_resolve_ui_font), когда Tk уже может перечислить установленные семейства.
-UI_FONT = "Times New Roman"
-UI_FONT_FALLBACKS = ["Times New Roman", "Liberation Serif", "Cambria", "DejaVu Serif"]
+# Шрифт интерфейса (панель, клавиатура, подсказки): TeX Gyre Schola из fonts/
+# (под Windows Tk видит его как «TeXGyreSchola»); если недоступен — замены.
+# Имя уточняется при старте (_resolve_ui_font), когда Tk уже может
+# перечислить семейства шрифтов.
+UI_FONT = "TeX Gyre Schola"
+UI_FONT_FALLBACKS = ["TeX Gyre Schola", "TeXGyreSchola", "Century Schoolbook",
+                     "Times New Roman", "Liberation Serif", "Cambria", "DejaVu Serif"]
 
 
 def _resolve_ui_font(root):

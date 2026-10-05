@@ -12,6 +12,15 @@ base = os.path.dirname(os.path.abspath(__file__))
 # скомпилированные модули (hiddenimports + pathex), копировать исходники
 # в datas не нужно.
 datas = []
+# Шрифты программы (TeX Gyre Schola, папка fonts/) → внутрь exe в папку fonts
+_fonts_dir = os.path.join(base, "fonts")
+if os.path.isdir(_fonts_dir):
+    for fn in sorted(os.listdir(_fonts_dir)):
+        if fn.lower().endswith((".otf", ".ttf", ".txt")):
+            datas.append((os.path.join(_fonts_dir, fn), "fonts"))
+else:
+    print("warning: fonts/ folder not found — the exe will fall back to system fonts")
+
 # Необязательные ресурсы: добавляем только если файл есть рядом
 for optional in ("ariadna-logo1-trnsp.png", "icon.ico"):
     if os.path.exists(os.path.join(base, optional)):
