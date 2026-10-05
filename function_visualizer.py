@@ -642,6 +642,7 @@ def _eval_array(f, xs):
 
 
 _MAX_ROOTS_1D = 60   # больше корней на одной оси — вырождение, не подписываем
+_MAX_GRID_LINES = 5000   # защита от «бесконечной» сетки при слишком мелком шаге
 
 
 def _scan_roots_1d(g, lo, hi, n=2000, xtol=1e-12):
@@ -2831,10 +2832,20 @@ def _plot_function_impl(fig=None):
         _ax_w_px, _ax_h_px = 600.0, 600.0
 
     # ── Сетка ───────────────────────────────────
+    def _multiples_in(lim_lo, lim_hi, step):
+        """Все кратные step на [lim_lo, lim_hi] — считаем от границ окна, а не
+        от нуля: раньше индексы шли в пределах ±(ширина окна/шаг), и дальше
+        ~12 единиц от начала координат сетка «пропадала»."""
+        if not (step > 0) or not (math.isfinite(lim_lo) and math.isfinite(lim_hi)):
+            return []
+        k_lo = int(math.ceil(lim_lo / step - 1e-9))
+        k_hi = int(math.floor(lim_hi / step + 1e-9))
+        if k_hi < k_lo or k_hi - k_lo > _MAX_GRID_LINES:
+            return []
+        return [round(k * step, 10) for k in range(k_lo, k_hi + 1)]
+
     def make_ticks_for_grid(lim_lo, lim_hi, step):
-        n_max = int(abs(lim_hi - lim_lo) / step) + 2
-        return sorted({round(k * step, 10) for k in range(-n_max, n_max + 1)
-                       if lim_lo <= k * step <= lim_hi})
+        return _multiples_in(lim_lo, lim_hi, step)
 
     if GRID:
         x_grid_vals = [v for v in make_ticks_for_grid(X_LIM_L, X_LIM_R, X_GRID)
@@ -2873,14 +2884,9 @@ def _plot_function_impl(fig=None):
 
     # ── Деления на осях ─────────────────────────
     def make_ticks(lim_lo, lim_hi, step):
-        n_max = int(abs(lim_hi) / step + abs(lim_lo) / step) + 2
-        vals = []
-        for k in range(-n_max, n_max + 1):
-            v = round(k * step, 10)
-            if (lim_lo + step - 1e-9 <= v <= lim_hi - step + 1e-9
-                    and abs(v) > 1e-9):
-                vals.append(v)
-        return sorted(set(vals))
+        # деления — кратные шага, отступающие от краёв не меньше чем на шаг, кроме нуля
+        return [v for v in _multiples_in(lim_lo + step - 1e-9, lim_hi - step + 1e-9, step)
+                if abs(v) > 1e-9]
 
     for v in make_ticks(X_LIM_L, X_LIM_R, X_GRID):
         if not X_HIDE:

@@ -799,3 +799,15 @@ def test_effective_limits_extend_to_canvas():
     xs = res['ax'].lines[0].get_xdata()
     assert len(xs) > 100 and xs.min() < -9 and xs.max() > 9 or any(
         len(l.get_xdata()) > 100 and l.get_xdata().min() < -9 for l in res['ax'].lines)
+
+
+def test_grid_far_from_origin():
+    """Сетка и деления строятся на любом расстоянии от начала координат (баг: пропадали дальше ±12)."""
+    for (xl, xr, yb, yt) in ((100, 110, 200, 210), (-18, -8, 6.5, 16.5), (1e6, 1e6 + 10, -5, 5)):
+        res = draw(["sin(x)"], X_LIM_L=xl, X_LIM_R=xr, Y_LIM_B=yb, Y_LIM_T=yt, X_GRID=1, Y_GRID=1)
+        xs = sorted(res['ax'].xaxis.get_majorticklocs())
+        ys = sorted(res['ax'].yaxis.get_majorticklocs())
+        assert len(xs) >= 8 and xs[0] >= xl and xs[-1] <= xr, (xl, xs)
+        assert len(ys) >= 8 and ys[0] >= yb and ys[-1] <= yt, (yb, ys)
+        tick_marks = [l for l in res['ax'].lines if l.get_marker() in ('|', '_')]
+        assert len(tick_marks) >= 16          # ~9 делений по каждой оси
