@@ -17,7 +17,7 @@ if not exist "%PYTHON%" (
 echo.
 
 echo [1/3] Installing dependencies...
-"%PYTHON%" -m pip install matplotlib numpy sympy scipy ttkbootstrap pillow pyinstaller -q
+"%PYTHON%" -m pip install matplotlib numpy sympy scipy pillow pyinstaller -q
 echo Done.
 echo.
 

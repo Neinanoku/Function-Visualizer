@@ -10,9 +10,14 @@ base = os.path.dirname(os.path.abspath(__file__))
 # Файлы данных: (источник, папка назначения внутри exe)
 datas = [
     (os.path.join(base, "function_visualizer.py"), "."),
-    (os.path.join(base, "ariadna-logo1-trnsp.png"), "."),
-    (os.path.join(base, "icon.ico"), "."),
+    (os.path.join(base, "math_editor.py"), "."),
 ]
+# Необязательные ресурсы: добавляем только если файл есть рядом
+for optional in ("ariadna-logo1-trnsp.png", "icon.ico"):
+    if os.path.exists(os.path.join(base, optional)):
+        datas.append((os.path.join(base, optional), "."))
+    else:
+        print(f"warning: {optional} not found — building without it")
 
 # Форматируем для spec файла
 datas_str = ",\n        ".join(
@@ -32,6 +37,7 @@ a = Analysis(
     ],
     hiddenimports=[
         'function_visualizer',
+        'math_editor',
         'matplotlib',
         'matplotlib.backends.backend_tkagg',
         'matplotlib.backends.backend_agg',
@@ -43,8 +49,8 @@ a = Analysis(
         'scipy',
         'scipy.signal',
         'scipy.optimize',
+        'scipy.special',
         'numpy',
-        'ttkbootstrap',
         'PIL',
         'PIL.Image',
         'PIL.ImageTk',
@@ -52,7 +58,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={{}},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['tests', 'pytest', 'IPython', 'jupyter', 'tkinter.test'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -75,7 +81,7 @@ exe = EXE(
     upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
-    icon={repr(os.path.join(base, 'icon.ico'))},
+    icon={repr(os.path.join(base, 'icon.ico')) if os.path.exists(os.path.join(base, 'icon.ico')) else None},
     console=False,
     disable_windowed_traceback=False,
     target_arch=None,

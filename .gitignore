@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+build/
+dist/
+FuncVisualizer.spec
+.venv/
+.pytest_cache/
