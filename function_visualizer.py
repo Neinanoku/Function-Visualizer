@@ -2764,12 +2764,23 @@ def plot_function(fig=None):
     ax.set_xlim(X_LIM_L, X_LIM_R)
     ax.set_ylim(Y_LIM_B, Y_LIM_T)
 
-    # Квадратная сетка при ЛЮБОМ соотношении окна: 'equal' делает одну
-    # единицу по X и одну по Y одинаковой длины на экране, поэтому клетки
-    # сетки всегда квадратные (при равных шагах X_GRID/Y_GRID).
-    # adjustable='box' ужимает рамку осей внутри квадратной фигуры под это
-    # соотношение, само окно (фигура) остаётся квадратным.
-    ax.set_aspect('equal', adjustable='box')
+    # Область построения всегда занимает всю фигуру (фиксированные поля), а
+    # View Window растягивает сам график: масштабы по X и Y независимы
+    # ('auto'), клетки сетки могут быть прямоугольными. Раньше стояло
+    # 'equal' — квадратные клетки ценой «усадки» рамки осей.
+    ax.set_aspect('auto')
+    try:
+        fig.subplots_adjust(left=0.03, right=0.97, bottom=0.03, top=0.97)
+    except Exception:
+        pass
+    # Размер осей в пикселях — для штриховки под 45° на ЭКРАНЕ и смещений
+    # подписей в пунктах при неравных масштабах по X и Y.
+    try:
+        _bb = ax.get_position()
+        _ax_w_px = max(1.0, _bb.width * fig.get_figwidth() * fig.dpi)
+        _ax_h_px = max(1.0, _bb.height * fig.get_figheight() * fig.dpi)
+    except Exception:
+        _ax_w_px, _ax_h_px = 600.0, 600.0
 
     # ── Сетка ───────────────────────────────────
     def make_ticks_for_grid(lim_lo, lim_hi, step):
@@ -2892,8 +2903,8 @@ def plot_function(fig=None):
     # Переводим offset points → единицы данных для xytext
     # чтобы drag работал в системе координат данных
     _fig_w_in, _fig_h_in = fig.get_size_inches()
-    pt_to_x = x_span / (_fig_w_in * 72)
-    pt_to_y = y_span / (_fig_h_in * 72)
+    pt_to_x = x_span / (_ax_w_px / fig.dpi * 72)      # единиц данных в одном пункте
+    pt_to_y = y_span / (_ax_h_px / fig.dpi * 72)
 
     def annotate_point(px, py, label, above, color, side=None):
         # Дедупликация: если такая точка уже подписана — пропускаем.
@@ -3364,11 +3375,19 @@ def plot_function(fig=None):
         return f'#{r:02x}{g:02x}{b:02x}'
 
     def draw_fill_lines(ax, xf, y1_fill, y2_fill, valid, fill_style, color,
-                        x_lim_l, x_lim_r, y_lim_b, y_lim_t, density=0.01):
+                        x_lim_l, x_lim_r, y_lim_b, y_lim_t, density=0.01,
+                        ax_px=(600.0, 600.0)):
         x_span = x_lim_r - x_lim_l
         y_span = y_lim_t - y_lim_b
-
-        step = min(x_span, y_span) * density
+        # Масштабы по осям могут отличаться (aspect 'auto'), поэтому штриховку
+        # строим в ЭКРАННЫХ пикселях: линии под 45° на экране — это y = sign·k·x + c
+        # в данных, где k = (px/ед. по X)/(px/ед. по Y). Шаг — тоже в пикселях,
+        # чтобы плотность не зависела от окна просмотра.
+        sx = ax_px[0] / x_span          # пикселей на единицу X
+        sy = ax_px[1] / y_span          # пикселей на единицу Y
+        k = sx / sy
+        step_px = density * min(ax_px)
+        step_c = step_px * np.sqrt(2) / sy      # шаг c в единицах Y
         lw   = 0.6
 
         # Стиль штриховки:
@@ -3387,21 +3406,21 @@ def plot_function(fig=None):
         y_lo = np.minimum(y1_fill, y2_fill)
         y_hi = np.maximum(y1_fill, y2_fill)
 
-        # Диапазон c должен покрыть все углы видимой области
+        # Диапазон c должен покрыть все углы видимой области (линия y = sign·k·x + c)
         corners_c = [
-            y_lim_b - sign * x_lim_l,
-            y_lim_b - sign * x_lim_r,
-            y_lim_t - sign * x_lim_l,
-            y_lim_t - sign * x_lim_r,
+            y_lim_b - sign * k * x_lim_l,
+            y_lim_b - sign * k * x_lim_r,
+            y_lim_t - sign * k * x_lim_l,
+            y_lim_t - sign * k * x_lim_r,
         ]
-        c_min = min(corners_c) - step
-        c_max = max(corners_c) + step
-        c_vals = np.arange(c_min, c_max, step * np.sqrt(2))
+        c_min = min(corners_c) - step_c
+        c_max = max(corners_c) + step_c
+        c_vals = np.arange(c_min, c_max, step_c)
 
         if fill_style == 2:
-            # Шаг по x, который при движении вдоль линии с |наклон|=1
-            # даёт ровно евклидово расстояние `step` между точками.
-            dot_dx = max(step / np.sqrt(2), 1e-9)
+            # Шаг по x, который при движении вдоль линии под 45° на экране
+            # даёт ровно евклидово (экранное) расстояние step_px между точками.
+            dot_dx = max(step_px / np.sqrt(2) / sx, 1e-9)
             # Привязываем фазу решётки к глобальной системе координат
             # (x_lim_l), а не к границам конкретной заливки — так точки
             # не "прыгают" при изменении from/to.
@@ -3420,7 +3439,7 @@ def plot_function(fig=None):
             idx = np.clip(np.searchsorted(xf, xs_lat), 0, len(xf) - 1)
 
             for c in c_vals:
-                y_lat = sign * xs_lat + c
+                y_lat = sign * k * xs_lat + c
                 ok = (valid[idx] &
                       (y_lat >= y_lo[idx]) & (y_lat <= y_hi[idx]))
                 if np.any(ok):
@@ -3430,8 +3449,8 @@ def plot_function(fig=None):
 
         # 45° (style 0) и 135° (style 1) — сплошные параллельные диагональные линии
         for c in c_vals:
-            # Линия: y = sign*x + c
-            y_line = sign * xf + c
+            # Линия: y = sign*k*x + c  (45° на экране)
+            y_line = sign * k * xf + c
 
             # Клипируем линию по области заливки [y_lo, y_hi]
             y_clipped = np.where(
@@ -3500,7 +3519,7 @@ def plot_function(fig=None):
             # Рисуем штриховку реальными линиями
             draw_fill_lines(ax, xf, y1_fill, y2_fill, valid, fill_style,
                             fill_color, X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T,
-                            density=density)
+                            density=density, ax_px=(_ax_w_px, _ax_h_px))
 
             # Вертикальные линии-границы по краям
             if show_borders:
@@ -3528,15 +3547,7 @@ def plot_function(fig=None):
         default_fontsize=AXIS_FS)
 
     if standalone:
-        plt.tight_layout()
         plt.show()
-    else:
-        try:
-            # Фиксированные поля вместо tight_layout: он измеряет каждый
-            # текст рендерером и стоил ~100–200 мс на перерисовку.
-            fig.subplots_adjust(left=0.03, right=0.97, bottom=0.03, top=0.97)
-        except Exception:
-            pass
 
     return {'ax': ax, 'errors': errors, 'pending': bool(_DRAW_STATE['pending'])}
 
