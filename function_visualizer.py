@@ -550,6 +550,9 @@ def _eval_array(f, xs):
         return np.array([_safe_val(f, xi) for xi in xs], dtype=float)
 
 
+_MAX_ROOTS_1D = 60   # больше корней на одной оси — вырождение, не подписываем
+
+
 def _scan_roots_1d(g, lo, hi, n=2000, xtol=1e-12):
     """
     Находит корни функции одной переменной g на [lo, hi]: сканирует мелкую
@@ -561,6 +564,19 @@ def _scan_roots_1d(g, lo, hi, n=2000, xtol=1e-12):
     ts = np.linspace(lo, hi, n)
     vals = _eval_array(g, ts)
     roots = []
+
+    # Вырожденный случай (g ≡ 0 или знакосмена почти в каждом узле, как у
+    # y = y или sin(1/x) у нуля): «корней» были бы тысячи, подписи не имеют
+    # смысла, а их точная идентификация заняла бы минуты — возвращаем пусто.
+    finite = np.isfinite(vals)
+    if not np.any(finite):
+        return []
+    if np.all(vals[finite] == 0.0):
+        return []
+    n_changes = int(np.sum((vals[:-1] * vals[1:] < 0) & finite[:-1] & finite[1:]))
+    n_zeros = int(np.sum(vals[finite] == 0.0))
+    if n_changes + n_zeros > _MAX_ROOTS_1D:
+        return []
 
     def _add(r):
         if not any(abs(r - e) < 1e-6 for e in roots):
@@ -2753,6 +2769,19 @@ def plot_function(fig=None):
             Z = h(X, Y)
             Z = np.asarray(Z, dtype=float)
             Z = np.broadcast_to(Z, X.shape)
+        # Вырожденные уравнения: тождество (y = y, x + 1 = x + 1 → H ≡ 0 —
+        # верно в КАЖДОЙ точке плоскости) или противоречие (H — ненулевая
+        # константа, x = x + 1). Рисовать нечего; сообщаем об этом как об
+        # ошибке строки, чтобы не вешать интерфейс тысячами «корней».
+        try:
+            H_const = (not H_sym.free_symbols)
+        except Exception:
+            H_const = False
+        Zf = Z[np.isfinite(Z)]
+        if H_const or Zf.size == 0 or np.all(Zf == 0.0):
+            if H_const and H_sym != 0:
+                raise ValueError("equation has no solutions (contradiction)")
+            raise ValueError("equation is an identity — every point satisfies it")
         # Рисуем линию уровня 0 => кривую F−G=0
         # linestyles matplotlib ожидает 'solid'/'dashed'/'dotted'
         ls_map = {'-': 'solid', '--': 'dashed', ':': 'dotted', '-.': 'dashdot'}

@@ -1408,11 +1408,15 @@ class MathEditor(tk.Frame):
 
     # ── публичный API ───────────────────────────────────────
     def insert_token(self, token):
+        # on_change вызываем только если СОДЕРЖИМОЕ изменилось: навигация
+        # (left/right/up/down) и холостые токены не должны запускать
+        # перерисовку графика в приложении.
+        before = self.model.to_json()
         self.model.insert_token(token)
         self._cursor_visible = True
         self._render()
         self._restart_blink()
-        if self.on_change is not None:
+        if self.on_change is not None and self.model.to_json() != before:
             self.on_change(self)
 
     def set_active(self, active):
