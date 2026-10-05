@@ -1643,7 +1643,11 @@ class MathEditor(tk.Frame):
 
     def _layout_node(self, node, px, depth, prev_box, prev_item):
         if isinstance(node, Atom):
-            italic = node.kind == 'var' or (node.kind == 'const' and node.text == 'e')
+            # Переменные и константы (e, π) — курсивом, как в учебниках. Для π это
+            # ещё и защита от путаницы: прямая греческая π во многих шрифтах
+            # (Century Schoolbook, Times) совпадает по рисунку с кириллической «п»,
+            # а в курсиве они различаются.
+            italic = node.kind in ('var', 'const')
             return _TextBox(self, node.text, px, italic)
         if isinstance(node, Frac):
             fpx = _scaled(px, _FRAC_SCALE)

@@ -308,6 +308,8 @@ class Keypad(tk.Frame):
                 fnt = (UI_FONT, 10, "bold") if is_digit else (UI_FONT, 10)
                 if len(label) > 4:            # arcsin, arccos… — чуть мельче, чтобы не слипались
                     fnt = (UI_FONT, 9)
+                if label in ("π", "e"):       # константы курсивом (прямая π похожа на «п»)
+                    fnt = (UI_FONT, 11, "italic")
                 if token == "__page__":
                     label = "fn ▸" if self._page == 0 else "◂ back"
                     tip = "more functions: arcsin, arccos, sinh…" if self._page == 0 else "back to sin, cos, ln…"
