@@ -18,6 +18,7 @@
 import sys
 import os
 import json
+import re
 import math
 import time
 import queue
@@ -156,14 +157,280 @@ UI_FONT_FALLBACKS = ["TeX Gyre Schola", "TeXGyreSchola", "Century Schoolbook",
 
 
 def _resolve_ui_font(root):
-    global UI_FONT
+    global UI_FONT, HE_FONT
     try:
         import tkinter.font as tkfont
         fams = set(tkfont.families(root))
         UI_FONT = next((f for f in UI_FONT_FALLBACKS if f in fams), UI_FONT_FALLBACKS[-1])
+        HE_FONT = next((f for f in HE_FONT_FALLBACKS if f in fams), HE_FONT_FALLBACKS[-1])
     except Exception:
         pass
     return UI_FONT
+
+
+# ═════════════════════════════════════════════════════════════
+#  ЯЗЫК ИНТЕРФЕЙСА / RTL
+# ═════════════════════════════════════════════════════════════
+# LANG = "en" — английский интерфейс (панель слева, график справа);
+# LANG = "he" — иврит (app_he.py): панель справа, график слева, ивритский
+# текст шрифтом David (HE_FONT), цифры и латиница — прежним UI_FONT.
+# Смешанные подписи («חיתוך עם X») разбиваются на фрагменты: ивритские
+# фрагменты — David, остальные — UI_FONT; фрагменты раскладываются справа
+# налево. Tk не делает bidi-переупорядочивание: на Windows он зеркалит
+# ивритский фрагмент сам (GDI), на Linux/macOS — зеркалим вручную.
+LANG = "en"
+HE_FONT = "David"
+HE_FONT_FALLBACKS = ["David", "David CLM", "Frank Ruehl CLM", "Noto Serif Hebrew",
+                     "FreeSerif", "DejaVu Sans"]
+_HEB_RUN_RE = re.compile(r'[\u0590-\u05FF][\u0590-\u05FF\s]*[\u0590-\u05FF]|[\u0590-\u05FF]')
+
+
+def RTL():
+    return LANG == "he"
+
+
+def has_heb(text):
+    return bool(text) and _HEB_RUN_RE.search(str(text)) is not None
+
+
+STRINGS_HE = {
+    # окно / карточки
+    "Function Visualizer — Ariadna": "מדמה פונקציות — Ariadna",
+    "Functions": "פונקציות", "+ Add function": "+ הוסף פונקציה",
+    "View Window": "חלון תצוגה", "X:  from / to": "X:  מ / עד", "Y:  from / to": "Y:  מ / עד",
+    "Tip: mouse wheel over the graph zooms, drag pans.": "טיפ: גלגלת העכבר מעל הגרף — זום, גרירה — הזזה.",
+    "Grid": "סריג", "Show grid": "הצג סריג", "  Step X:": "צעד X:", "Step Y:": "צעד Y:",
+    "Display on Graph": "הצגה על הגרף",
+    "Asymptotes": "אסימפטוטות", "Holes": "חורים", "Extrema": "קיצון",
+    "X-intercepts": "חיתוך עם X", "Y-intercepts": "חיתוך עם Y", "Intersections": "חיתוך בין פונקציות",
+    "Show values": "הצגת ערכים", "Hide X labels": "הסתר תוויות X", "Hide Y labels": "הסתר תוויות Y",
+    "Label size:": "גודל תווית:",
+    "Area Fill": "צביעת שטח", "+ Add fill": "+ הוסף צביעה",
+    "f1 / f2 — function indices (0, 1, …) or 'x' for the X axis":
+        "f1 / f2 — אינדקסי פונקציות (0, 1, …) או 'x' עבור ציר X",
+    "Graph Labels": "תוויות על הגרף",
+    "Double-click empty space on the graph to add a label. Drag to move, scroll to rotate, "
+    "right-click for options. Point labels can be dragged too.":
+        "לחיצה כפולה על מקום ריק בגרף מוסיפה תווית. גרירה — הזזה, גלגלת — סיבוב, "
+        "לחיצה ימנית — אפשרויות. גם תוויות נקודות ניתנות לגרירה.",
+    "Clear all labels": "נקה את כל התוויות", "Reset point labels": "אפס תוויות נקודות",
+    "  Save image…": "שמור תמונה…", "Reset view": "איפוס תצוגה",
+    "Save project": "שמור פרויקט", "Open project": "פתח פרויקט",
+    # строки функции / заливки
+    "w:": "עובי:", "domain:": "תחום:", "Solid": "רציף", "Dashed": "מקווקו", "Dotted": "נקודות",
+    "Pick color for f{idx}": "בחר צבע עבור f{idx}",
+    "from:": "מ:", "to:": "עד:", "style:": "סגנון:", "borders": "קצוות", "density:": "צפיפות:",
+    "45deg ////": "45° ////", "135deg \\\\": "135° \\\\", "Dots ....": "נקודות ....",
+    # диалоги
+    "Cannot delete": "לא ניתן למחוק", "At least one function is required.": "נדרשת לפחות פונקציה אחת.",
+    "Remove all {n} label(s) added on the graph?": "להסיר את כל {n} התוויות שנוספו על הגרף?",
+    "Save graph image": "שמור תמונת גרף", "PNG image": "תמונת PNG", "SVG vector": "וקטור SVG",
+    "All files": "כל הקבצים", "Save error": "שגיאת שמירה", "Saved: {path}": "נשמר: {path}",
+    "Function Visualizer project": "פרויקט Function Visualizer",
+    "Project saved: {path}": "הפרויקט נשמר: {path}", "Open error": "שגיאת פתיחה",
+    "Cannot open project:\n{err}": "לא ניתן לפתוח את הפרויקט:\n{err}",
+    "Project loaded: {path}": "הפרויקט נטען: {path}",
+    # статус
+    "Ready": "מוכן", "Refining labels (symbolic analysis)…": "מעדן תוויות (ניתוח סימבולי)…",
+    "Some functions are incomplete or invalid — hover the red field":
+        "חלק מהפונקציות לא שלמות או שגויות — העבר את העכבר מעל השדה האדום",
+    "Symbolic analysis timed out — some labels stay numeric":
+        "הניתוח הסימבולי חרג מהזמן — חלק מהתוויות יישארו מספריות",
+    "Plot error — previous graph restored (details: {log})":
+        "שגיאת שרטוט — הגרף הקודם שוחזר (פרטים: {log})",
+    "Zoom-out limit for the current grid step — increase Step X / Step Y":
+        "הגבלת הרחקה עבור צעד הסריג הנוכחי — הגדל את צעד X / Y",
+    "visible x": "נראה x", "visible y": "נראה y",
+    # проверка настроек
+    "{what}: cannot read '{val}'": "{what}: לא ניתן לקרוא '{val}'",
+    "X from": "X מ", "X to": "X עד", "Y from": "Y מ", "Y to": "Y עד", "Step X": "צעד X", "Step Y": "צעד Y",
+    "View window must be finite": "חלון התצוגה חייב להיות סופי",
+    "View window: left < right and bottom < top required": "חלון תצוגה: נדרש שמאל < ימין ותחתון < עליון",
+    "Grid step must be a positive finite number": "צעד הסריג חייב להיות מספר חיובי סופי",
+    "Grid step is too small for this view window": "צעד הסריג קטן מדי עבור חלון תצוגה זה",
+    "Fill #{n}: check parameters": "צביעה #{n}: בדוק פרמטרים",
+    # подсказки клавиатуры
+    "variable x": "משתנה x", "variable y (for equations, e.g. x²+y²=9)": "משתנה y (למשוואות, למשל x²+y²=9)",
+    "square": "ריבוע", "power": "חזקה", "open parenthesis": "פתח סוגריים",
+    "leave the parentheses": "צא מהסוגריים", "square root": "שורש ריבועי", "n-th root": "שורש n-י",
+    "absolute value": "ערך מוחלט", "the number π": "המספר π", "the number e": "המספר e", "fraction": "שבר",
+    "sine": "סינוס", "cosine": "קוסינוס", "tangent": "טנגנס", "cotangent": "קוטנגנס",
+    "natural logarithm": "לוגריתם טבעי", "common (base-10) logarithm": "לוגריתם עשרוני",
+    "logarithm with base a": "לוגריתם בבסיס a", "exponential": "אקספוננט",
+    "more functions: arcsin, arccos, sinh…": "עוד פונקציות: arcsin, arccos, sinh…",
+    "back to sin, cos, ln…": "חזרה ל-sin, cos, ln…",
+    "cursor up (numerator)": "סמן למעלה (מונה)", "cursor down (denominator)": "סמן למטה (מכנה)",
+    "inverse sine": "סינוס הפוך", "inverse cosine": "קוסינוס הפוך", "inverse tangent": "טנגנס הפוך",
+    "secant": "סקנס", "cosecant": "קוסקנס", "hyperbolic sine": "סינוס היפרבולי",
+    "hyperbolic cosine": "קוסינוס היפרבולי", "hyperbolic tangent": "טנגנס היפרבולי",
+    "multiply": "כפל", "minus": "מינוס", "decimal point": "נקודה עשרונית",
+    "equals (equation / x = c)": "שווה (משוואה / x = c)", "plus": "פלוס",
+    "cursor left": "סמן שמאלה", "cursor right": "סמן ימינה", "delete": "מחק", "clear the field": "נקה את השדה",
+}
+
+# Подписи движка (меню и диалоги свободных подписей на графике)
+ENGINE_STRINGS_HE = {
+    "New label": "תווית חדשה", "Edit label": "עריכת תווית", "Label text:": "טקסט התווית:",
+    "Label color": "צבע התווית", "Edit text": "ערוך טקסט", "Text color...": "צבע טקסט...",
+    "Text size": "גודל טקסט", "Reset rotation": "אפס סיבוב", "Delete": "מחק",
+    "Add label here": "הוסף תווית כאן", '"{key}" label color...': 'צבע תווית "{key}"...',
+    "Label size": "גודל תווית", "Reset position": "אפס מיקום",
+}
+
+# Сообщения об ошибках формулы (редактор + движок)
+ERRORS_HE = {
+    "Syntax error": "שגיאת תחביר", "Invalid expression": "ביטוי לא תקין",
+    "Division by zero": "חלוקה באפס",
+    "Undefined value (division by zero or log base 1?)": "ערך לא מוגדר (חלוקה באפס או לוג בבסיס 1?)",
+    "equation is an identity — every point satisfies it": "המשוואה היא זהות — כל נקודה מקיימת אותה",
+    "equation has no solutions (contradiction)": "למשוואה אין פתרונות (סתירה)",
+    "empty expression": "ביטוי ריק", "exponent without base": "מעריך ללא בסיס",
+    "subscript is only allowed as a log base": "אינדקס תחתון מותר רק כבסיס לוגריתם",
+}
+_ERR_PARTS_HE = {
+    "exponent": "מעריך", "denominator": "מכנה", "numerator": "מונה", "expression": "ביטוי",
+    "log base": "בסיס הלוגריתם", "parentheses": "סוגריים", "root index": "מעריך השורש",
+    "root": "שורש", "absolute value": "ערך מוחלט",
+}
+_ERR_PATTERNS_HE = [
+    (re.compile(r"^empty (.+)$"), lambda m: f"{_ERR_PARTS_HE.get(m.group(1), m.group(1))} ריק"),
+    (re.compile(r"^trailing operator in (.+)$"), lambda m: f"אופרטור בסוף {_ERR_PARTS_HE.get(m.group(1), m.group(1))}"),
+    (re.compile(r"^lone '\.' in (.+)$"), lambda m: f"נקודה בודדת ב{_ERR_PARTS_HE.get(m.group(1), m.group(1))}"),
+    (re.compile(r"^(.+) without argument$"), lambda m: f"{m.group(1)} ללא ארגומנט"),
+    (re.compile(r"^bad number '(.+)'$"), lambda m: f"מספר שגוי '{m.group(1)}'"),
+    (re.compile(r"^operator '(.+)' without left operand$"), lambda m: f"אופרטור '{m.group(1)}' ללא אופרנד שמאלי"),
+    (re.compile(r"^unknown name: (.+)$"), lambda m: f"שם לא מוכר: {m.group(1)}"),
+    (re.compile(r"^cannot parse the constant in (.+)$"), lambda m: f"לא ניתן לפענח את הקבוע ב-{m.group(1)}"),
+]
+
+
+def T(text, **fmt):
+    """Строка интерфейса на текущем языке (ключ — английская строка)."""
+    out = STRINGS_HE.get(text, text) if LANG == "he" else text
+    return out.format(**fmt) if fmt else out
+
+
+def tr_err(msg):
+    """Перевод сообщения об ошибке формулы; неизвестное — как есть."""
+    if LANG != "he" or not msg:
+        return msg
+    if msg in ERRORS_HE:
+        return ERRORS_HE[msg]
+    for rx, fn in _ERR_PATTERNS_HE:
+        m = rx.match(msg)
+        if m:
+            return fn(m)
+    return msg
+
+
+def _he_runs(text):
+    """[(фрагмент, иврит?)] в логическом порядке."""
+    runs, pos = [], 0
+    for m in _HEB_RUN_RE.finditer(text):
+        if m.start() > pos:
+            runs.append((text[pos:m.start()], False))
+        runs.append((m.group(0), True))
+        pos = m.end()
+    if pos < len(text):
+        runs.append((text[pos:], False))
+    return runs
+
+
+def _display_run(run, is_heb):
+    # Windows: GDI зеркалит ивритский фрагмент сам; иначе делаем это вручную
+    if is_heb and sys.platform != "win32":
+        return run[::-1]
+    return run
+
+
+def he_display(text):
+    """Чисто ивритская строка (кнопка, пункт меню, заголовок окна) → как показывать."""
+    if not has_heb(text):
+        return text
+    if sys.platform == "win32":
+        return text
+    return ''.join(_display_run(r, h) for r, h in reversed(_he_runs(text)))
+
+
+def ui_font(text, size, bold=False, italic=False):
+    """Кортеж шрифта Tk: David для строк с ивритом, иначе UI_FONT."""
+    fam = HE_FONT if (LANG == "he" and has_heb(text)) else UI_FONT
+    style = " ".join(w for w, on in (("bold", bold), ("italic", italic)) if on)
+    return (fam, size, style) if style else (fam, size)
+
+
+def side():
+    """Сторона упаковки «начала строки»: left для LTR, right для RTL."""
+    return "right" if RTL() else "left"
+
+
+def oside():
+    return "left" if RTL() else "right"
+
+
+def anchor_start():
+    return "e" if RTL() else "w"
+
+
+def make_label(parent, text, size=9, color=SUBTEXT, bold=False, bg=None, **kw):
+    """
+    Подпись интерфейса. В английском режиме — обычный tk.Label. В иврите
+    строка разбивается на фрагменты: ивритские — шрифт David, остальные
+    (цифры, латиница, знаки) — UI_FONT; фрагменты упакованы справа налево.
+    Возвращает виджет (Label или Frame) — у него есть .pack()/.grid().
+    """
+    bg = bg or (parent.cget("bg") if hasattr(parent, "cget") else CARD_BG)
+    text = T(text)
+    if not (RTL() and has_heb(text)):
+        return tk.Label(parent, text=text, bg=bg, fg=color, font=ui_font(text, size, bold), **kw)
+    box = tk.Frame(parent, bg=bg)
+    for run, is_heb in _he_runs(text):
+        if not run.strip() and not is_heb:
+            run = run.replace(" ", "\u00a0")       # пробел между фрагментами
+        tk.Label(box, text=_display_run(run, is_heb), bg=bg, fg=color,
+                 font=(HE_FONT if is_heb else UI_FONT, size + (1 if is_heb else 0),
+                       "bold") if bold else (HE_FONT if is_heb else UI_FONT, size + (1 if is_heb else 0)),
+                 padx=0, bd=0).pack(side="right")
+    return box
+
+
+def make_check(parent, text, var, bg=None):
+    """Чекбокс с подписью; в иврите — индикатор справа, подпись (фрагментами) слева."""
+    bg = bg or parent.cget("bg")
+    text = T(text)
+    if not (RTL() and has_heb(text)):
+        return tk.Checkbutton(parent, text=text, variable=var, bg=bg, fg=TEXT,
+                              selectcolor=ENTRY_BG, activebackground=bg, activeforeground=TEXT,
+                              font=ui_font(text, 10), bd=0, highlightthickness=0)
+    box = tk.Frame(parent, bg=bg)
+    cb = tk.Checkbutton(box, text="", variable=var, bg=bg, fg=TEXT, selectcolor=ENTRY_BG,
+                        activebackground=bg, activeforeground=TEXT, bd=0, highlightthickness=0, padx=0)
+    cb.pack(side="right")
+    lbl = make_label(box, text, size=10, color=TEXT, bg=bg)
+    lbl.pack(side="right")
+
+    def toggle(_e=None):
+        var.set(0 if var.get() else 1)
+    for w in [lbl] + list(lbl.winfo_children()):
+        w.bind("<Button-1>", toggle)
+        w.configure(cursor="hand2")
+    return box
+
+
+def apply_engine_language():
+    """Передаёт движку переводы его меню и настройки ивритского текста на графике."""
+    if LANG == "he":
+        fv.UI_TRANSLATIONS = dict(ENGINE_STRINGS_HE)
+        fv.EXTRA_FONT_FAMILIES = [HE_FONT, "DejaVu Sans"]
+        fv.BIDI_SIMPLE = True
+    else:
+        fv.UI_TRANSLATIONS = {}
+        fv.EXTRA_FONT_FAMILIES = []
+        fv.BIDI_SIMPLE = False
+    try:
+        fv.apply_font_preset()
+    except Exception:
+        pass
 
 
 def _resource_path(name):
@@ -213,6 +480,8 @@ def log_exception(context=""):
 # ═════════════════════════════════════════════════════════════
 
 def styled_entry(parent, width=14, **kw):
+    if RTL():
+        kw.setdefault("justify", "right")
     e = tk.Entry(parent, width=width, bg=ENTRY_BG, fg=TEXT,
                  insertbackground=TEXT, relief="flat",
                  font=(UI_FONT, 10),
@@ -244,8 +513,8 @@ def card(parent, title=""):
     inner = tk.Frame(outer, bg=CARD_BG, bd=0, relief="flat")
     inner.pack(fill="both", expand=True)
     if title:
-        tk.Label(inner, text=title, bg=CARD_BG, fg=ACCENT,
-                 font=(UI_FONT, 10, "bold")).pack(anchor="w", padx=10, pady=(8, 2))
+        make_label(inner, title, size=10, color=ACCENT, bold=True, bg=CARD_BG).pack(
+            anchor=anchor_start(), padx=10, pady=(8, 2))
         tk.Frame(inner, bg=BORDER, height=1).pack(fill="x", padx=8, pady=(0, 6))
     inner._outer = outer   # храним ссылку чтобы pack вызывать снаружи
     return inner
@@ -257,11 +526,15 @@ def card_pack(widget, **kw):
 
 
 def small_button(parent, text, command, bg=BTN_DEL, fg="white", **kw):
-    opts = dict(bg=bg, fg=fg, relief="flat", font=(UI_FONT, 9, "bold"),
+    text = T(text)
+    opts = dict(bg=bg, fg=fg, relief="flat", font=ui_font(text, 9, bold=True),
                 cursor="hand2", bd=0, padx=10, pady=4, activebackground=bg,
                 activeforeground=fg, command=command)
+    if "font" in kw and has_heb(text) and LANG == "he":
+        f = kw.pop("font")
+        kw["font"] = ui_font(text, f[1], bold="bold" in f[2:])
     opts.update(kw)
-    return tk.Button(parent, text=text, **opts)
+    return tk.Button(parent, text=he_display(text), **opts)
 
 
 class Tooltip:
@@ -283,8 +556,11 @@ class Tooltip:
         self.tip = tk.Toplevel(self.widget)
         self.tip.wm_overrideredirect(True)
         self.tip.wm_geometry(f"+{x}+{y}")
-        tk.Label(self.tip, text=self.text, bg="#fffbe6", fg=TEXT,
-                 font=(UI_FONT, 9), relief="solid", bd=1, padx=6, pady=3).pack()
+        box = tk.Frame(self.tip, bg=BORDER, padx=1, pady=1)
+        box.pack()
+        inner = tk.Frame(box, bg="#fffbe6", padx=6, pady=3)
+        inner.pack()
+        make_label(inner, self.text, size=9, color=TEXT, bg="#fffbe6").pack()
 
     def _hide(self, _event=None):
         if self.tip is not None:
@@ -397,7 +673,7 @@ class Keypad(tk.Frame):
                 holder.grid(row=r, column=c, padx=1, pady=1, sticky="nsew")
                 parent.grid_columnconfigure(c, minsize=_px(self.KEY_MIN_W))
                 if tip:
-                    Tooltip(b, tip)
+                    Tooltip(b, T(tip))
 
     # ── нажатие ──────────────────────────────────────────────
     def _press(self, token):
@@ -424,65 +700,67 @@ class FuncRow:
         self.frame = tk.Frame(parent, bg=PANEL_BG)
         self.frame.pack(fill="x", padx=4, pady=(3, 0))
 
+        S, S2 = side(), oside()        # начало строки / конец строки (RTL-aware)
+
         # Индекс функции
         self.idx_label = tk.Label(self.frame, text=f"f{idx}", width=2,
                                   bg=PANEL_BG, fg=SUBTEXT, font=(UI_FONT, 9, "bold"))
-        self.idx_label.pack(side="left", padx=(6, 2))
+        self.idx_label.pack(side=S, padx=(6, 2))
 
         # Кликабельный цветной квадрат — выбор цвета
         self.dot = tk.Button(self.frame, bg=self.color, activebackground=self.color,
                              width=2, height=1, relief="flat", bd=0,
                              cursor="hand2", command=self._pick_color)
-        self.dot.pack(side="left", padx=(2, 6))
+        self.dot.pack(side=S, padx=(2, 6))
 
         # Поле формулы — 2-D редактор без клавиатуры (ввод с экранной клавиатуры)
         self.editor = MathEditor(self.frame, font_size=_px(15), on_change=lambda _e: on_change(),
-                                 on_focus=lambda e: on_focus(self), width=_px(260), height=_px(40))
-        self.editor.pack(side="left", padx=2, fill="x", expand=True)
+                                 on_focus=lambda e: on_focus(self), width=_px(260), height=_px(40),
+                                 error_font=(HE_FONT, 10) if RTL() else None)
+        self.editor.pack(side=S, padx=2, fill="x", expand=True)
 
         # Кнопка удалить
         tk.Button(self.frame, text="✕", bg=BTN_DEL, fg="white", activebackground=BTN_DEL,
                   relief="flat", font=(UI_FONT, 9, "bold"), cursor="hand2", bd=0, padx=6,
-                  command=lambda: on_delete(self)).pack(side="right", padx=4)
+                  command=lambda: on_delete(self)).pack(side=S2, padx=4)
 
         # ── Вторая строка: стиль линии + область определения ──
         self.frame2 = tk.Frame(parent, bg=PANEL_BG)
         self.frame2.pack(fill="x", padx=4, pady=(0, 3))
 
-        tk.Label(self.frame2, text="", width=2, bg=PANEL_BG).pack(side="left", padx=(6, 2))
+        tk.Label(self.frame2, text="", width=2, bg=PANEL_BG).pack(side=S, padx=(6, 2))
 
         # Ширина линии — кнопки ▼/▲
-        tk.Label(self.frame2, text="w:", bg=PANEL_BG, fg=SUBTEXT,
-                 font=(UI_FONT, 8)).pack(side="left", padx=(2, 1))
+        make_label(self.frame2, "w:", size=8, bg=PANEL_BG).pack(side=S, padx=(2, 1))
         self._lw_idx = 3   # default = 1.8
         self._lw_label = tk.Label(self.frame2, text=f"{self.get_linewidth()}", width=3,
                                   bg=ENTRY_BG, fg=TEXT, font=(UI_FONT, 9), relief="flat",
                                   highlightthickness=1, highlightbackground=BORDER)
-        self._lw_label.pack(side="left")
+        self._lw_label.pack(side=S)
         btn_f = dict(bg=PANEL_BG, fg=TEXT, relief="flat", bd=0, font=(UI_FONT, 8),
                      cursor="hand2", padx=2, activebackground=PANEL_BG)
-        tk.Button(self.frame2, text="▼", command=lambda: self._lw_step(-1), **btn_f).pack(side="left")
-        tk.Button(self.frame2, text="▲", command=lambda: self._lw_step(+1), **btn_f).pack(side="left", padx=(0, 4))
+        tk.Button(self.frame2, text="▼", command=lambda: self._lw_step(-1), **btn_f).pack(side=S)
+        tk.Button(self.frame2, text="▲", command=lambda: self._lw_step(+1), **btn_f).pack(side=S, padx=(0, 4))
 
-        # Тип линии
-        self.linestyle_var = tk.StringVar(value=list(self.LINESTYLES.keys())[0])
+        # Тип линии (подписи пунктов — на языке интерфейса)
+        self._style_names = {T(k): v for k, v in self.LINESTYLES.items()}
+        self.linestyle_var = tk.StringVar(value=T(list(self.LINESTYLES.keys())[0]))
         self.linestyle_var.trace_add("write", lambda *_: on_change())
-        om = tk.OptionMenu(self.frame2, self.linestyle_var, *self.LINESTYLES.keys())
+        om = tk.OptionMenu(self.frame2, self.linestyle_var, *self._style_names.keys())
         om.config(bg=ENTRY_BG, fg=TEXT, activebackground=CARD_BG, activeforeground=TEXT,
-                  relief="flat", font=(UI_FONT, 8), bd=0, highlightthickness=1,
+                  relief="flat", font=ui_font(T("Solid"), 8), bd=0, highlightthickness=1,
                   highlightbackground=BORDER, width=7)
-        om["menu"].config(bg=ENTRY_BG, fg=TEXT, activebackground=ACCENT, font=(UI_FONT, 9))
-        om.pack(side="left", padx=(2, 6))
+        om["menu"].config(bg=ENTRY_BG, fg=TEXT, activebackground=ACCENT, font=ui_font(T("Solid"), 9))
+        om.pack(side=S, padx=(2, 6))
 
         # Область определения: функция строится только на [from, to]
-        tk.Label(self.frame2, text="domain:", bg=PANEL_BG, fg=SUBTEXT,
-                 font=(UI_FONT, 8)).pack(side="left", padx=(2, 4))
+        make_label(self.frame2, "domain:", size=8, bg=PANEL_BG).pack(side=S, padx=(2, 4))
         self.dom_from = live_entry(self.frame2, 6, "-inf", on_change)
-        self.dom_from.pack(side="left", padx=2)
+        self.dom_from.pack(side=S, padx=2)
         tk.Label(self.frame2, text="…", bg=PANEL_BG, fg=SUBTEXT,
-                 font=(UI_FONT, 8)).pack(side="left")
+                 font=(UI_FONT, 8)).pack(side=S)
         self.dom_to = live_entry(self.frame2, 6, "inf", on_change)
-        self.dom_to.pack(side="left", padx=2)
+        self.dom_to.pack(side=S, padx=2)
 
     # ── ширина ───────────────────────────────────────────────
     def _lw_step(self, d):
@@ -491,7 +769,7 @@ class FuncRow:
         self.on_change()
 
     def _pick_color(self):
-        result = colorchooser.askcolor(color=self.color, title=f"Pick color for f{self.idx}")
+        result = colorchooser.askcolor(color=self.color, title=T("Pick color for f{idx}", idx=self.idx))
         if result and result[1]:
             self.set_color(result[1])
             self.on_change()
@@ -519,7 +797,12 @@ class FuncRow:
         return self.LW_VALUES[self._lw_idx]
 
     def get_linestyle(self):
-        return self.LINESTYLES.get(self.linestyle_var.get(), "-")
+        return self._style_names.get(self.linestyle_var.get(), "-")
+
+    def _style_key(self):
+        """Английское имя стиля (для проекта), независимо от языка интерфейса."""
+        v = self.get_linestyle()
+        return next((k for k, s in self.LINESTYLES.items() if s == v), "Solid")
 
     def is_empty(self):
         return self.editor.model.is_empty()
@@ -549,7 +832,7 @@ class FuncRow:
             "text": self.editor.model.to_display(),
             "color": self.color,
             "width": self.get_linewidth(),
-            "style": self.linestyle_var.get(),
+            "style": self._style_key(),
             "domain": [self.dom_from.get(), self.dom_to.get()],
         }
 
@@ -574,7 +857,7 @@ class FuncRow:
         self.set_color(d.get("color", self.color))
         self.set_linewidth(d.get("width", 1.8))
         if d.get("style") in self.LINESTYLES:
-            self.linestyle_var.set(d["style"])
+            self.linestyle_var.set(T(d["style"]))
         dom = d.get("domain", ["-inf", "inf"])
         self.dom_from.var.set(str(dom[0]))
         self.dom_to.var.set(str(dom[1]))
@@ -595,31 +878,35 @@ class FillRow:
         self.frame = tk.Frame(parent, bg=PANEL_BG)
         self.frame.pack(fill="x", padx=4, pady=3)
 
+        S, S2 = side(), oside()
+
         def lbl(t, parent=None):
-            tk.Label(parent or self.frame, text=t, bg=PANEL_BG, fg=SUBTEXT,
-                     font=(UI_FONT, 9)).pack(side="left", padx=(4, 1))
+            make_label(parent or self.frame, t, size=9, bg=PANEL_BG).pack(side=S, padx=(4, 1))
 
         lbl("f1:")
-        self.f1 = live_entry(self.frame, 3, "0", on_change); self.f1.pack(side="left")
+        self.f1 = live_entry(self.frame, 3, "0", on_change); self.f1.pack(side=S)
         lbl("f2:")
-        self.f2 = live_entry(self.frame, 4, "x", on_change); self.f2.pack(side="left")
+        self.f2 = live_entry(self.frame, 4, "x", on_change); self.f2.pack(side=S)
         lbl("from:")
-        self.x_from = live_entry(self.frame, 6, "-3", on_change); self.x_from.pack(side="left")
+        self.x_from = live_entry(self.frame, 6, "-3", on_change); self.x_from.pack(side=S)
         lbl("to:")
-        self.x_to = live_entry(self.frame, 6, "3", on_change); self.x_to.pack(side="left")
+        self.x_to = live_entry(self.frame, 6, "3", on_change); self.x_to.pack(side=S)
 
         lbl("style:")
-        self.style_var = tk.StringVar(value=self.STYLES[0])
+        self._style_names = [T(x) for x in self.STYLES]
+        self.style_var = tk.StringVar(value=self._style_names[0])
         self.style_var.trace_add("write", lambda *_: on_change())
-        om = tk.OptionMenu(self.frame, self.style_var, *self.STYLES)
+        om = tk.OptionMenu(self.frame, self.style_var, *self._style_names)
         om.config(bg=ENTRY_BG, fg=TEXT, activebackground=CARD_BG, activeforeground=TEXT,
-                  relief="flat", font=(UI_FONT, 9), bd=0, highlightthickness=0, width=9)
-        om["menu"].config(bg=ENTRY_BG, fg=TEXT, activebackground=ACCENT)
-        om.pack(side="left", padx=4)
+                  relief="flat", font=ui_font(self._style_names[-1], 9), bd=0,
+                  highlightthickness=0, width=9)
+        om["menu"].config(bg=ENTRY_BG, fg=TEXT, activebackground=ACCENT,
+                          font=ui_font(self._style_names[-1], 9))
+        om.pack(side=S, padx=4)
 
         tk.Button(self.frame, text="✕", bg=BTN_DEL, fg="white", activebackground=BTN_DEL,
                   relief="flat", font=(UI_FONT, 9, "bold"), cursor="hand2", bd=0, padx=6,
-                  command=lambda: on_delete(self)).pack(side="right", padx=(10, 4))
+                  command=lambda: on_delete(self)).pack(side=S2, padx=(10, 4))
 
         # вторая строка: границы + плотность
         self.frame2 = tk.Frame(parent, bg=PANEL_BG)
@@ -627,9 +914,7 @@ class FillRow:
 
         self.borders_var = tk.IntVar(value=1)
         self.borders_var.trace_add("write", lambda *_: on_change())
-        tk.Checkbutton(self.frame2, text="borders", variable=self.borders_var,
-                       bg=PANEL_BG, fg=TEXT, selectcolor=ENTRY_BG, activebackground=PANEL_BG,
-                       font=(UI_FONT, 8), bd=0, highlightthickness=0).pack(side="left", padx=4)
+        make_check(self.frame2, "borders", self.borders_var, bg=PANEL_BG).pack(side=S, padx=4)
 
         lbl("density:", self.frame2)
         self.density_var = tk.IntVar(value=100)
@@ -647,8 +932,8 @@ class FillRow:
                  variable=self.density_var, length=_px(110), resolution=5,
                  bg=CARD_BG, fg=TEXT, troughcolor=ACCENT, activebackground=BTN_DEL,
                  highlightthickness=0, bd=0, sliderrelief="flat", showvalue=False,
-                 command=_on_density, font=(UI_FONT, 7)).pack(side="left")
-        self._density_ind.pack(side="left", padx=(4, 0))
+                 command=_on_density, font=(UI_FONT, 7)).pack(side=S)
+        self._density_ind.pack(side=S, padx=(4, 0))
 
     def get(self):
         """Returns tuple (f1, f2, x_from, x_to, style, borders, density) or None on error."""
@@ -658,7 +943,7 @@ class FillRow:
             f2 = f2_raw if f2_raw.lower() in ("x", "") else int(f2_raw)
             x_from  = fv.parse_number(self.x_from.get())
             x_to    = fv.parse_number(self.x_to.get())
-            style   = self.STYLES.index(self.style_var.get())
+            style   = self._style_names.index(self.style_var.get())
             borders = bool(self.borders_var.get())
             # density: 0%→step=0.05 (редко),  100%→step=0.01 (густо)
             pct     = self.density_var.get() / 100.0
@@ -669,7 +954,7 @@ class FillRow:
 
     def to_dict(self):
         return {"f1": self.f1.get(), "f2": self.f2.get(), "from": self.x_from.get(),
-                "to": self.x_to.get(), "style": self.style_var.get(),
+                "to": self.x_to.get(), "style": self.STYLES[self._style_names.index(self.style_var.get())],
                 "borders": self.borders_var.get(), "density": self.density_var.get()}
 
     def from_dict(self, d):
@@ -678,7 +963,7 @@ class FillRow:
         self.x_from.var.set(str(d.get("from", "-3")))
         self.x_to.var.set(str(d.get("to", "3")))
         if d.get("style") in self.STYLES:
-            self.style_var.set(d["style"])
+            self.style_var.set(self._style_names[self.STYLES.index(d["style"])])
         self.borders_var.set(int(d.get("borders", 1)))
         self.density_var.set(int(d.get("density", 100)))
         self._density_ind.config(text=str(self.density_var.get()))
@@ -803,7 +1088,8 @@ class App(tk.Tk):
         super().__init__()
         _resolve_ui_font(self)
         self._init_dpi_scale()
-        self.title("Function Visualizer — Ariadna")
+        apply_engine_language()
+        self.title(he_display(T("Function Visualizer — Ariadna")))
         self.configure(bg=APP_BG)
         self.resizable(True, True)
         self.minsize(_px(980), _px(640))
@@ -923,14 +1209,14 @@ class App(tk.Tk):
     #  UI
     # ══════════════════════════════════════════════════════════
     def _build_ui(self):
-        # ── Левая колонка (настройки) ───────────────────────
+        # ── Колонка настроек (слева; в иврите — справа) ─────
         left = tk.Frame(self, bg=APP_BG, width=_px(LEFT_PANEL_WIDTH))
-        left.pack(side="left", fill="y")
+        left.pack(side=side(), fill="y")
         left.pack_propagate(False)
 
-        # ── Правая часть (график) ───────────────────────────
+        # ── График (справа; в иврите — слева) ───────────────
         right = tk.Frame(self, bg=APP_BG)
-        right.pack(side="left", fill="both", expand=True)
+        right.pack(side=side(), fill="both", expand=True)
 
         self._build_header(left)
         self._build_settings(left)
@@ -946,17 +1232,17 @@ class App(tk.Tk):
             w = int(img.width * h / img.height)
             img = img.resize((w, h), Image.LANCZOS)
             self._logo_img = ImageTk.PhotoImage(img)
-            tk.Label(hdr, image=self._logo_img, bg=APP_BG).pack(side="left", padx=(16, 10), pady=6)
+            tk.Label(hdr, image=self._logo_img, bg=APP_BG).pack(side=side(), padx=(16, 10), pady=6)
         except Exception:
             tk.Label(hdr, text="ariadna", bg=APP_BG, fg=ACCENT,
-                     font=(UI_FONT, 18, "bold")).pack(side="left", padx=16, pady=6)
+                     font=(UI_FONT, 18, "bold")).pack(side=side(), padx=16, pady=6)
 
         title_frame = tk.Frame(hdr, bg=APP_BG)
-        title_frame.pack(side="left", padx=(0, 10))
+        title_frame.pack(side=side(), padx=(0, 10))
         tk.Label(title_frame, text="Function Visualizer", bg=APP_BG, fg=TEXT,
-                 font=(UI_FONT, 16, "bold")).pack(anchor="w")
+                 font=(UI_FONT, 16, "bold")).pack(anchor=anchor_start())
         tk.Label(title_frame, text="by Daniel", bg=APP_BG, fg=SUBTEXT,
-                 font=(UI_FONT, 9)).pack(anchor="w")
+                 font=(UI_FONT, 9)).pack(anchor=anchor_start())
         tk.Frame(parent, bg=ACCENT, height=3).pack(fill="x")
 
     def _build_settings(self, parent):
@@ -971,8 +1257,8 @@ class App(tk.Tk):
         # Внутренний фрейм всегда во всю ширину канваса
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win, width=e.width))
         canvas.configure(yscrollcommand=scroll.set)
-        scroll.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
+        scroll.pack(side=oside(), fill="y")          # полоса прокрутки у внешнего края
+        canvas.pack(side=side(), fill="both", expand=True)
 
         # Колесо прокручивает настройки только когда курсор над левой панелью
         def _wheel(e):
@@ -996,12 +1282,12 @@ class App(tk.Tk):
         self.func_list = tk.Frame(self.func_card, bg=PANEL_BG)
         self.func_list.pack(fill="x", padx=8, pady=4)
         small_button(self.func_card, "+ Add function", self._add_func,
-                     bg=BTN_ADD).pack(anchor="w", padx=10, pady=(0, 6))
+                     bg=BTN_ADD).pack(anchor=anchor_start(), padx=10, pady=(0, 6))
 
         # Экранная клавиатура — внутри карточки функций
         tk.Frame(self.func_card, bg=BORDER, height=1).pack(fill="x", padx=8, pady=(0, 6))
         self.keypad = Keypad(self.func_card, self._on_key)
-        self.keypad.pack(anchor="w", padx=10, pady=(0, 8))
+        self.keypad.pack(anchor=anchor_start(), padx=10, pady=(0, 8))
 
         # ── View window ──────────────────────────────────────
         lim = card(p, "View Window")
@@ -1012,19 +1298,22 @@ class App(tk.Tk):
         def lim_row(label, defaults):
             r = tk.Frame(g, bg=CARD_BG)
             r.pack(fill="x", pady=2)
-            tk.Label(r, text=label, bg=CARD_BG, fg=SUBTEXT,
-                     font=(UI_FONT, 9), width=12, anchor="e").pack(side="left")
+            if RTL():
+                make_label(r, label, size=9, bg=CARD_BG).pack(side="right", padx=(0, 8))
+            else:
+                tk.Label(r, text=label, bg=CARD_BG, fg=SUBTEXT,
+                         font=(UI_FONT, 9), width=12, anchor="e").pack(side="left")
             entries = []
             for d in defaults:
                 e = live_entry(r, 8, d, self.schedule_redraw)
-                e.pack(side="left", padx=4)
+                e.pack(side=side(), padx=4)
                 entries.append(e)
             return entries
 
         self.xlim_l, self.xlim_r = lim_row("X:  from / to", ["-5", "5"])
         self.ylim_b, self.ylim_t = lim_row("Y:  from / to", ["-5", "5"])
-        tk.Label(g, text="Tip: mouse wheel over the graph zooms, drag pans.",
-                 bg=CARD_BG, fg=SUBTEXT, font=(UI_FONT, 8)).pack(anchor="w", padx=4, pady=(4, 0))
+        make_label(g, "Tip: mouse wheel over the graph zooms, drag pans.", size=8,
+                   bg=CARD_BG).pack(anchor=anchor_start(), padx=4, pady=(4, 0))
 
         # ── Grid ─────────────────────────────────────────────
         grid_c = card(p, "Grid")
@@ -1033,13 +1322,13 @@ class App(tk.Tk):
         gr.pack(fill="x", padx=10, pady=(0, 10))
 
         self.grid_var = self._live_int(1)
-        styled_check(gr, "Show grid", self.grid_var).pack(side="left", padx=4)
-        tk.Label(gr, text="  Step X:", bg=CARD_BG, fg=SUBTEXT, font=(UI_FONT, 9)).pack(side="left")
+        make_check(gr, "Show grid", self.grid_var).pack(side=side(), padx=4)
+        make_label(gr, "  Step X:", size=9, bg=CARD_BG).pack(side=side())
         self.xgrid_e = live_entry(gr, 5, "1", self.schedule_redraw)
-        self.xgrid_e.pack(side="left", padx=4)
-        tk.Label(gr, text="Step Y:", bg=CARD_BG, fg=SUBTEXT, font=(UI_FONT, 9)).pack(side="left")
+        self.xgrid_e.pack(side=side(), padx=4)
+        make_label(gr, "Step Y:", size=9, bg=CARD_BG).pack(side=side())
         self.ygrid_e = live_entry(gr, 5, "1", self.schedule_redraw)
-        self.ygrid_e.pack(side="left", padx=4)
+        self.ygrid_e.pack(side=side(), padx=4)
 
         # ── Display options ───────────────────────────────────
         disp = card(p, "Display on Graph")
@@ -1071,45 +1360,49 @@ class App(tk.Tk):
         grid_f = tk.Frame(dg, bg=CARD_BG)
         grid_f.pack(fill="x")
         for i, (txt, var) in enumerate(checks):
-            styled_check(grid_f, txt, var).grid(row=i // 3, column=i % 3, sticky="w", padx=6, pady=1)
+            col = (2 - i % 3) if RTL() else (i % 3)      # в иврите колонки справа налево
+            make_check(grid_f, txt, var).grid(row=i // 3, column=col, sticky=anchor_start(),
+                                              padx=6, pady=1)
+        if RTL():
+            grid_f.pack_configure(anchor="e")
 
         # Размер текста
         row3 = tk.Frame(dg, bg=CARD_BG); row3.pack(fill="x", pady=(6, 2))
-        tk.Label(row3, text="Label size:", bg=CARD_BG, fg=SUBTEXT,
-                 font=(UI_FONT, 9)).pack(side="left", padx=(6, 4))
+        make_label(row3, "Label size:", size=9, bg=CARD_BG).pack(side=side(), padx=(6, 4))
         self.font_size_var = tk.IntVar(value=10)
         tk.Scale(row3, from_=6, to=20, orient="horizontal", variable=self.font_size_var,
                  length=_px(160), bg=CARD_BG, fg=TEXT, troughcolor=ACCENT, activebackground=BTN_DEL,
                  highlightthickness=0, bd=0, sliderrelief="flat", font=(UI_FONT, 8),
-                 command=lambda _v: self.schedule_redraw()).pack(side="left")
+                 command=lambda _v: self.schedule_redraw()).pack(side=side())
         tk.Label(row3, textvariable=self.font_size_var, bg=CARD_BG, fg=ACCENT,
-                 font=(UI_FONT, 9, "bold"), width=3).pack(side="left", padx=2)
+                 font=(UI_FONT, 9, "bold"), width=3).pack(side=side(), padx=2)
 
 
         # ── Fill ─────────────────────────────────────────────
         self.fill_card = card(p, "Area Fill")
         card_pack(self.fill_card, fill="x", padx=12, pady=4)
-        tk.Label(self.fill_card,
-                 text="f1 / f2 — function indices (0, 1, …) or 'x' for the X axis",
-                 bg=CARD_BG, fg=SUBTEXT, font=(UI_FONT, 8)).pack(anchor="w", padx=10)
+        make_label(self.fill_card, "f1 / f2 — function indices (0, 1, …) or 'x' for the X axis",
+                   size=8, bg=CARD_BG).pack(anchor=anchor_start(), padx=10)
         self.fill_list = tk.Frame(self.fill_card, bg=PANEL_BG)
         self.fill_list.pack(fill="x", padx=8, pady=4)
         small_button(self.fill_card, "+ Add fill", self._add_fill,
-                     bg=BTN_BLUE).pack(anchor="w", padx=10, pady=(0, 8))
+                     bg=BTN_BLUE).pack(anchor=anchor_start(), padx=10, pady=(0, 8))
 
         # ── Graph Labels ─────────────────────────────────────
         labels_card = card(p, "Graph Labels")
         card_pack(labels_card, fill="x", padx=12, pady=4)
-        tk.Label(labels_card,
-                 text="Double-click empty space on the graph to add a label. "
-                      "Drag to move, scroll to rotate, right-click for options. "
-                      "Point labels can be dragged too.",
-                 bg=CARD_BG, fg=SUBTEXT, font=(UI_FONT, 8),
-                 wraplength=_px(LEFT_PANEL_WIDTH - 60), justify="left").pack(anchor="w", padx=10, pady=(0, 6))
+        hint = T("Double-click empty space on the graph to add a label. "
+                 "Drag to move, scroll to rotate, right-click for options. "
+                 "Point labels can be dragged too.")
+        tk.Label(labels_card, text=he_display(hint) if not has_heb(hint) or sys.platform == "win32"
+                 else hint[::-1],
+                 bg=CARD_BG, fg=SUBTEXT, font=ui_font(hint, 8),
+                 wraplength=_px(LEFT_PANEL_WIDTH - 60), justify="right" if RTL() else "left",
+                 anchor=anchor_start()).pack(anchor=anchor_start(), fill="x", padx=10, pady=(0, 6))
         bl = tk.Frame(labels_card, bg=CARD_BG)
-        bl.pack(anchor="w", padx=10, pady=(0, 8))
-        small_button(bl, "Clear all labels", self._clear_labels).pack(side="left")
-        small_button(bl, "Reset point labels", self._reset_point_labels).pack(side="left", padx=6)
+        bl.pack(anchor=anchor_start(), padx=10, pady=(0, 8))
+        small_button(bl, "Clear all labels", self._clear_labels).pack(side=side())
+        small_button(bl, "Reset point labels", self._reset_point_labels).pack(side=side(), padx=6)
 
         tk.Frame(p, bg=APP_BG, height=12).pack()
 
@@ -1123,13 +1416,13 @@ class App(tk.Tk):
         bar.pack(fill="x", padx=10, pady=(10, 4))
 
         small_button(bar, "  Save image…", self._save_image, bg=BTN_SAVE,
-                     font=(UI_FONT, 11, "bold"), padx=16, pady=7).pack(side="left")
+                     font=(UI_FONT, 11, "bold"), padx=16, pady=7).pack(side=side())
         small_button(bar, "Reset view", self._reset_view, bg=BTN_DEL,
-                     pady=7).pack(side="left", padx=(8, 0))
+                     pady=7).pack(side=side(), padx=(8, 0))
         small_button(bar, "Open project", self._open_project, bg=BTN_BLUE,
-                     pady=7).pack(side="right")
+                     pady=7).pack(side=oside())
         small_button(bar, "Save project", self._save_project, bg=BTN_BLUE,
-                     pady=7).pack(side="right", padx=(0, 6))
+                     pady=7).pack(side=oside(), padx=(0, 6))
 
         # Холст matplotlib
         frame = tk.Frame(parent, bg=BORDER, padx=1, pady=1)
@@ -1144,9 +1437,17 @@ class App(tk.Tk):
         w.bind("<Configure>", self._on_canvas_resize, add="+")
         self._preview = FramePreview(self.canvas)
 
+        # Строка состояния. В иврите текст собирается из фрагментов
+        # (иврит — David, цифры — UI_FONT) в status_box; self.status (Label)
+        # хранит полный текст (его читают тесты) и в RTL не показывается.
         self.status = tk.Label(parent, text="", bg=APP_BG, fg=SUBTEXT,
                                font=(UI_FONT, 9), anchor="w")
-        self.status.pack(fill="x", padx=12, pady=(0, 8))
+        if RTL():
+            self.status_box = tk.Frame(parent, bg=APP_BG)
+            self.status_box.pack(fill="x", padx=12, pady=(0, 8))
+        else:
+            self.status_box = None
+            self.status.pack(fill="x", padx=12, pady=(0, 8))
 
     # ── утилиты ──────────────────────────────────────────────
     def _pointer_in(self, widget):
@@ -1159,6 +1460,10 @@ class App(tk.Tk):
 
     def _set_status(self, text, color=SUBTEXT):
         self.status.config(text=text, fg=color)
+        if self.status_box is not None:
+            for w in self.status_box.winfo_children():
+                w.destroy()
+            make_label(self.status_box, text, size=9, color=color, bg=APP_BG).pack(side="right")
 
     # ══════════════════════════════════════════════════════════
     #  Клавиатура → активный редактор
@@ -1186,8 +1491,8 @@ class App(tk.Tk):
     def _clear_labels(self):
         if not fv.FREE_TEXTS:
             return
-        if not messagebox.askyesno("Clear all labels",
-                                   f"Remove all {len(fv.FREE_TEXTS)} label(s) added on the graph?"):
+        if not messagebox.askyesno(he_display(T("Clear all labels")),
+                                   he_display(T("Remove all {n} label(s) added on the graph?", n=len(fv.FREE_TEXTS)))):
             return
         fv.FREE_TEXTS.clear()
         self.schedule_redraw()
@@ -1211,7 +1516,8 @@ class App(tk.Tk):
 
     def _del_func(self, row):
         if len(self.func_rows) <= 1:
-            messagebox.showwarning("Cannot delete", "At least one function is required.")
+            messagebox.showwarning(he_display(T("Cannot delete")),
+                                   he_display(T("At least one function is required.")))
             return
         row.destroy()
         self.func_rows.remove(row)
@@ -1272,7 +1578,7 @@ class App(tk.Tk):
                     funcs.append(r.get())
                     r.editor.set_error(None)
                 except IncompleteExpression as ex:
-                    r.editor.set_error(str(ex))
+                    r.editor.set_error(tr_err(str(ex)))
                     self._incomplete_rows += 1
                     funcs.append("")
             colors.append(r.get_color())
@@ -1284,25 +1590,25 @@ class App(tk.Tk):
             try:
                 return fv.parse_number(entry.get())
             except Exception:
-                raise ValueError(f"{what}: cannot read '{entry.get()}'")
+                raise ValueError(T("{what}: cannot read '{val}'", what=T(what), val=entry.get()))
 
         xl = num(self.xlim_l, "X from"); xr = num(self.xlim_r, "X to")
         yb = num(self.ylim_b, "Y from"); yt = num(self.ylim_t, "Y to")
         if not all(map(lambda v: v == v and abs(v) != float("inf"), (xl, xr, yb, yt))):
-            raise ValueError("View window must be finite")
+            raise ValueError(T("View window must be finite"))
         if xl >= xr or yb >= yt:
-            raise ValueError("View window: left < right and bottom < top required")
+            raise ValueError(T("View window: left < right and bottom < top required"))
         xg = num(self.xgrid_e, "Step X"); yg = num(self.ygrid_e, "Step Y")
         if not (math.isfinite(xg) and math.isfinite(yg)) or xg <= 0 or yg <= 0:
-            raise ValueError("Grid step must be a positive finite number")
+            raise ValueError(T("Grid step must be a positive finite number"))
         if (xr - xl) / xg > MAX_GRID_LINES or (yt - yb) / yg > MAX_GRID_LINES:
-            raise ValueError("Grid step is too small for this view window")
+            raise ValueError(T("Grid step is too small for this view window"))
 
         fills = []
         for i, fr in enumerate(self.fill_rows):
             entry = fr.get()
             if entry is None:
-                raise ValueError(f"Fill #{i + 1}: check parameters")
+                raise ValueError(T("Fill #{n}: check parameters", n=i + 1))
             fills.append(entry)
 
         return dict(funcs=funcs, colors=colors, widths=widths, styles=styles, domains=domains,
@@ -1355,7 +1661,7 @@ class App(tk.Tk):
                 result = fv.plot_function(self.fig)
             except Exception:
                 log_exception("plot_function")
-                self._set_status(f"Plot error — previous graph restored (details: {ERROR_LOG})",
+                self._set_status(T("Plot error — previous graph restored (details: {log})", log=ERROR_LOG),
                                  ERR_COLOR)
                 self._restore_last_good()
                 return
@@ -1364,7 +1670,7 @@ class App(tk.Tk):
             errors = result.get('errors', {}) or {}
             for idx, r in enumerate(self.func_rows):
                 if idx in errors and not r.is_empty():
-                    r.editor.set_error(errors[idx])
+                    r.editor.set_error(tr_err(errors[idx]))
             # Синхронная отрисовка: новый кадр готов сразу, и предпросмотр
             # (сдвинутый/масштабированный старый кадр) можно убрать без «моргания».
             try:
@@ -1378,12 +1684,12 @@ class App(tk.Tk):
 
             if result.get('pending'):
                 self._submit_jobs(fv.take_pending_jobs())
-                self._set_status("Refining labels (symbolic analysis)…")
+                self._set_status(T("Refining labels (symbolic analysis)…"))
             elif errors or self._incomplete_rows:
-                self._set_status("Some functions are incomplete or invalid — hover the red field",
+                self._set_status(T("Some functions are incomplete or invalid — hover the red field"),
                                  ERR_COLOR)
             else:
-                self._set_status("Ready" + self._visible_range_note(result.get('ax')))
+                self._set_status(T("Ready") + self._visible_range_note(result.get('ax')))
         finally:
             self._drawing = False
             if self._redraw_wanted and self._pan is None:
@@ -1401,9 +1707,9 @@ class App(tk.Tk):
             def g(v):
                 return f"{v:.4g}".replace("-", "\u2212")
             if abs(xr - xl - (lims[1] - lims[0])) > 1e-9 * max(1.0, abs(xr - xl)):
-                return f"  ·  visible x: {g(xl)} … {g(xr)}"
+                return f"  ·  {T('visible x')}: {g(xl)} … {g(xr)}"
             if abs(yt - yb - (lims[3] - lims[2])) > 1e-9 * max(1.0, abs(yt - yb)):
-                return f"  ·  visible y: {g(yb)} … {g(yt)}"
+                return f"  ·  {T('visible y')}: {g(yb)} … {g(yt)}"
         except Exception:
             pass
         return ""
@@ -1491,7 +1797,7 @@ class App(tk.Tk):
                 self._running_keys.difference_update(keys)
                 self._active_batch = None
             self._start_worker_thread()
-            self._set_status("Symbolic analysis timed out — some labels stay numeric", ERR_COLOR)
+            self._set_status(T("Symbolic analysis timed out — some labels stay numeric"), ERR_COLOR)
             self.schedule_redraw()
 
         self._poll_job = self.after(150, self._poll_worker)
@@ -1593,7 +1899,7 @@ class App(tk.Tk):
         try:
             xg = fv.parse_number(self.xgrid_e.get()); yg = fv.parse_number(self.ygrid_e.get())
             if (nxr - nxl) / xg > MAX_GRID_LINES or (nyt - nyb) / yg > MAX_GRID_LINES:
-                self._set_status("Zoom-out limit for the current grid step — increase Step X / Step Y",
+                self._set_status(T("Zoom-out limit for the current grid step — increase Step X / Step Y"),
                                  ERR_COLOR)
                 return
         except Exception:
@@ -1688,18 +1994,18 @@ class App(tk.Tk):
     # ══════════════════════════════════════════════════════════
     def _save_image(self):
         path = filedialog.asksaveasfilename(
-            title="Save graph image",
+            title=he_display(T("Save graph image")),
             defaultextension=".png",
-            filetypes=[("PNG image", "*.png"), ("SVG vector", "*.svg"),
-                       ("PDF", "*.pdf"), ("All files", "*.*")],
+            filetypes=[(he_display(T("PNG image")), "*.png"), (he_display(T("SVG vector")), "*.svg"),
+                       ("PDF", "*.pdf"), (he_display(T("All files")), "*.*")],
             initialfile="graph.png")
         if not path:
             return
         try:
             self.fig.savefig(path, dpi=200, bbox_inches="tight", facecolor="white")
-            self._set_status(f"Saved: {path}", BTN_ADD)
+            self._set_status(T("Saved: {path}", path=path), BTN_ADD)
         except Exception as ex:
-            messagebox.showerror("Save error", str(ex))
+            messagebox.showerror(he_display(T("Save error")), str(ex))
 
     # ── проект (все настройки + подписи) ─────────────────────
     def _project_dict(self):
@@ -1724,32 +2030,32 @@ class App(tk.Tk):
 
     def _save_project(self):
         path = filedialog.asksaveasfilename(
-            title="Save project", defaultextension=self.PROJECT_EXT,
-            filetypes=[("Function Visualizer project", "*" + self.PROJECT_EXT), ("JSON", "*.json")],
+            title=he_display(T("Save project")), defaultextension=self.PROJECT_EXT,
+            filetypes=[(he_display(T("Function Visualizer project")), "*" + self.PROJECT_EXT), ("JSON", "*.json")],
             initialfile="graph" + self.PROJECT_EXT)
         if not path:
             return
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(self._project_dict(), f, ensure_ascii=False, indent=2)
-            self._set_status(f"Project saved: {path}", BTN_ADD)
+            self._set_status(T("Project saved: {path}", path=path), BTN_ADD)
         except Exception as ex:
-            messagebox.showerror("Save error", str(ex))
+            messagebox.showerror(he_display(T("Save error")), str(ex))
 
     def _open_project(self):
         path = filedialog.askopenfilename(
-            title="Open project",
-            filetypes=[("Function Visualizer project", "*" + self.PROJECT_EXT),
-                       ("JSON", "*.json"), ("All files", "*.*")])
+            title=he_display(T("Open project")),
+            filetypes=[(he_display(T("Function Visualizer project")), "*" + self.PROJECT_EXT),
+                       ("JSON", "*.json"), (he_display(T("All files")), "*.*")])
         if not path:
             return
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             self.load_project(data)
-            self._set_status(f"Project loaded: {path}", BTN_ADD)
+            self._set_status(T("Project loaded: {path}", path=path), BTN_ADD)
         except Exception as ex:
-            messagebox.showerror("Open error", f"Cannot open project:\n{ex}")
+            messagebox.showerror(he_display(T("Open error")), he_display(T("Cannot open project:\n{err}", err=ex)))
 
     def load_project(self, data):
         self._loading = True
@@ -1825,6 +2131,14 @@ class App(tk.Tk):
 
 # ═════════════════════════════════════════════════════════════
 
-if __name__ == "__main__":
+def main(lang=None):
+    """Точка входа. lang='he' — ивритская версия (см. app_he.py)."""
+    global LANG
+    if lang:
+        LANG = lang
     app = App()
     app.mainloop()
+
+
+if __name__ == "__main__":
+    main()

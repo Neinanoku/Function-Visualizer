@@ -67,6 +67,40 @@ FONT_PRESETS = {
 }
 
 
+# ── Локализация подписей интерфейса движка (меню/диалоги свободных подписей)
+# Приложение кладёт сюда словарь {английская строка: перевод}; tr() возвращает
+# перевод или исходную строку. EXTRA_FONT_FAMILIES — дополнительные семейства
+# (например, шрифт с ивритом) в конец списка font.family: matplotlib берёт из
+# них глифы, которых нет в основном шрифте. BIDI_SIMPLE — простой bidi для
+# свободных подписей (matplotlib не переставляет RTL-текст): зеркалим
+# ивритские фрагменты.
+UI_TRANSLATIONS = {}
+EXTRA_FONT_FAMILIES = []
+BIDI_SIMPLE = False
+_HEB_RUN_RE = re.compile(r'[\u0590-\u05FF][\u0590-\u05FF\s]*[\u0590-\u05FF]|[\u0590-\u05FF]')
+
+
+def tr(text):
+    return UI_TRANSLATIONS.get(text, text)
+
+
+def bidi_display(text):
+    """Визуальный порядок для строки с ивритом: ивритские фрагменты зеркалятся,
+    порядок фрагментов обращается (для чисто ивритской строки — просто reverse)."""
+    if not text or not BIDI_SIMPLE or not _HEB_RUN_RE.search(text):
+        return text
+    parts = []
+    pos = 0
+    for m in _HEB_RUN_RE.finditer(text):
+        if m.start() > pos:
+            parts.append(text[pos:m.start()])
+        parts.append(m.group(0)[::-1])
+        pos = m.end()
+    if pos < len(text):
+        parts.append(text[pos:])
+    return ''.join(reversed(parts))
+
+
 def _font_available(name):
     try:
         from matplotlib import font_manager
@@ -82,7 +116,13 @@ def apply_font_preset(name=None):
     name = name or GRAPH_FONT
     families, fontset = FONT_PRESETS.get(name, FONT_PRESETS['schola'])
     GRAPH_FONT = name if name in FONT_PRESETS else 'schola'
-    plt.rcParams['font.family'] = list(families)
+    fam_list = list(families)
+    if EXTRA_FONT_FAMILIES:
+        # запасные семейства (иврит и т.п.) — перед generic 'serif'
+        generic = [f for f in fam_list if f in ('serif', 'sans-serif')]
+        fam_list = [f for f in fam_list if f not in generic] + \
+                   [f for f in EXTRA_FONT_FAMILIES if f not in fam_list] + generic
+    plt.rcParams['font.family'] = fam_list
     if fontset == 'custom':
         # «Свой» шрифт для математики: берём первое установленное семейство
         # (Century Schoolbook; на машине без него — Schola/Times); недостающие
@@ -2290,7 +2330,7 @@ class FreeTextManager:
     # ── Отрисовка ──────────────────────────────────────────
     def _create_artist(self, record):
         return self.ax.text(
-            record['x'], record['y'], prettify_math_text(record['text']),
+            record['x'], record['y'], bidi_display(prettify_math_text(record['text'])),
             color=record.get('color', '#000000'),
             fontsize=record.get('fontsize', self.font_size),
             rotation=record.get('rotation', 0),
@@ -2368,7 +2408,7 @@ class FreeTextManager:
     # ── Добавление / редактирование / удаление ──────────────
     def _add_text_at(self, x, y):
         from tkinter import simpledialog
-        text = simpledialog.askstring("New label", "Label text:",
+        text = simpledialog.askstring(tr("New label"), tr("Label text:"),
                                        parent=self._tk_root())
         if not text:
             return
@@ -2381,7 +2421,7 @@ class FreeTextManager:
     def _edit_text(self, record, artist):
         from tkinter import simpledialog
         new_text = simpledialog.askstring(
-            "Edit label", "Label text:",
+            tr("Edit label"), tr("Label text:"),
             initialvalue=record['text'], parent=self._tk_root())
         if new_text is None:
             return
@@ -2389,7 +2429,7 @@ class FreeTextManager:
             self._delete(record, artist)
             return
         record['text'] = new_text
-        artist.set_text(prettify_math_text(new_text))
+        artist.set_text(bidi_display(prettify_math_text(new_text)))
         self.fig.canvas.draw_idle()
 
     def _delete(self, record, artist):
@@ -2411,7 +2451,7 @@ class FreeTextManager:
         from tkinter import colorchooser
         initial = record.get('color', '#000000')
         result = colorchooser.askcolor(
-            color=initial, title="Label color", parent=self._tk_root())
+            color=initial, title=tr("Label color"), parent=self._tk_root())
         if result is None or result[1] is None:
             return
         record['color'] = result[1]
@@ -2440,22 +2480,22 @@ class FreeTextManager:
         menu = tk.Menu(root, tearoff=0)
         if hit is not None:
             record, artist = hit
-            menu.add_command(label="Edit text",
+            menu.add_command(label=tr("Edit text"),
                               command=lambda: self._edit_text(record, artist))
-            menu.add_command(label="Text color...",
+            menu.add_command(label=tr("Text color..."),
                               command=lambda: self._set_color(record, artist))
-            menu.add_cascade(label="Text size",
+            menu.add_cascade(label=tr("Text size"),
                               menu=self._build_size_submenu(menu, record, artist))
-            menu.add_command(label="Reset rotation",
+            menu.add_command(label=tr("Reset rotation"),
                               command=lambda: self._reset_rotation(record, artist))
             menu.add_separator()
-            menu.add_command(label="Delete",
+            menu.add_command(label=tr("Delete"),
                               command=lambda: self._delete(record, artist))
         else:
             if event.xdata is None or event.ydata is None:
                 return
             menu.add_command(
-                label="Add label here",
+                label=tr("Add label here"),
                 command=lambda: self._add_text_at(event.xdata, event.ydata))
         try:
             menu.tk_popup(event.guiEvent.x_root, event.guiEvent.y_root)
@@ -2615,15 +2655,15 @@ class AxisLabelManager:
         if root is None or event.guiEvent is None:
             return
         menu = tk.Menu(root, tearoff=0)
-        menu.add_command(label=f'"{key}" label color...',
+        menu.add_command(label=tr('"{key}" label color...').replace("{key}", key),
                           command=lambda: self._set_color(key))
         sub = tk.Menu(menu, tearoff=0)
         for size in (8, 10, 12, 14, 16, 20, 24, 28):
             sub.add_command(label=str(size),
                             command=lambda s=size: self._set_size(key, s))
-        menu.add_cascade(label="Label size", menu=sub)
+        menu.add_cascade(label=tr("Label size"), menu=sub)
         menu.add_separator()
-        menu.add_command(label="Reset position",
+        menu.add_command(label=tr("Reset position"),
                           command=lambda: self._reset_position(key))
         try:
             menu.tk_popup(event.guiEvent.x_root, event.guiEvent.y_root)

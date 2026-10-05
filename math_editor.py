@@ -1382,6 +1382,7 @@ class MathEditor(tk.Frame):
         self.border_color = kw.pop('border_color', '#d1d5db')
         self.active_color = kw.pop('active_color', '#2a7ae0')
         self.error_color = kw.pop('error_color', '#d93025')
+        self.error_font = kw.pop('error_font', None)      # шрифт подсказки ошибки (напр. иврит)
         self.placeholder_color = kw.pop('placeholder_color', '#b0b6bf')
         self.placeholder_fill = kw.pop('placeholder_fill', '#e4eefb')
         self.padx = kw.pop('padx', 6)
@@ -1542,7 +1543,7 @@ class MathEditor(tk.Frame):
             tip.wm_overrideredirect(True)
             tk.Label(tip, text=self._error, bg='#fff4f4', fg=self.error_color,
                      relief='solid', bd=1, padx=6, pady=3,
-                     font=('Segoe UI', 9)).pack()
+                     font=self.error_font or ('Segoe UI', 9)).pack()
             x = self.winfo_rootx() + 8
             y = self.winfo_rooty() + self.winfo_height() + 2
             tip.wm_geometry('+%d+%d' % (x, y))
