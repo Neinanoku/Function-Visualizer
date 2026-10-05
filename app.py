@@ -70,8 +70,18 @@ ERR_COLOR = "#d9363e"
 
 FUNC_COLORS = fv.CURVE_COLORS  # берём из движка
 
+# Пресеты шрифта графика: подпись в меню → ключ fv.FONT_PRESETS
+FONT_CHOICES = [
+    ("Times New Roman (STIX)", "times"),
+    ("LaTeX (Computer Modern)", "latex"),
+    ("Century Schoolbook", "century"),
+    ("DejaVu Serif", "serif"),
+    ("Sans (Calibri)", "sans"),
+]
+
 LEFT_PANEL_WIDTH = 500
-REDRAW_DELAY_MS  = 250
+REDRAW_DELAY_MS  = 250        # после правок в панели
+ZOOM_DELAY_MS    = 120        # после колеса мыши (предпросмотр уже показан)
 SYMBOLIC_TIMEOUT_S = 20.0     # сторож: пачка символьных заданий дольше этого — считается зависшей
 MAX_GRID_LINES   = 2000       # span / step не больше этого (иначе сетка «съедает» рисунок)
 
@@ -594,6 +604,110 @@ class FillRow:
 
 
 # ═════════════════════════════════════════════════════════════
+#  МГНОВЕННЫЙ ПРЕДПРОСМОТР ПРИ ПАНОРАМИРОВАНИИ / ЗУМЕ
+# ═════════════════════════════════════════════════════════════
+
+class FramePreview:
+    """
+    Пока идёт настоящая перерисовка (100–300 мс), показываем поверх холста
+    снимок последнего кадра, сдвинутый (пан) или масштабированный (зум)
+    вокруг курсора — как в Desmos. Снимок берётся из буфера Agg, кладётся
+    в tk.Label поверх виджета холста и просто перемещается; скрывается
+    сразу после синхронной отрисовки нового кадра.
+    """
+
+    def __init__(self, canvas):
+        self.canvas = canvas
+        self.widget = canvas.get_tk_widget()
+        self.base = None        # PIL.Image последнего кадра
+        self.photo = None
+        self.label = None
+        self.size = (0, 0)
+
+    def snapshot(self):
+        """Снимок текущего кадра; False, если буфер недоступен."""
+        try:
+            from PIL import Image
+            import numpy as np
+            buf = np.asarray(self.canvas.buffer_rgba())
+            self.base = Image.fromarray(buf, "RGBA").convert("RGB")
+            self.size = self.base.size
+            return True
+        except Exception:
+            self.base = None
+            return False
+
+    @property
+    def active(self):
+        return self.label is not None
+
+    def _show(self, img, x=0, y=0):
+        try:
+            from PIL import ImageTk
+            self.photo = ImageTk.PhotoImage(img)
+            if self.label is None:
+                self.label = tk.Label(self.widget, image=self.photo, bd=0,
+                                      highlightthickness=0, bg="white")
+            else:
+                self.label.configure(image=self.photo)
+            self.label.place(in_=self.widget, x=int(round(x)), y=int(round(y)))
+            self.label.lift()
+        except Exception:
+            self.hide()
+
+    def show_shift(self, dx, dy):
+        """Пан: снимок, сдвинутый на (dx, dy) пикселей (y вниз), на белом фоне
+        во всю площадь холста — старый кадр из-под него не выглядывает."""
+        if self.base is None:
+            return
+        try:
+            from PIL import Image
+            W, H = self.size
+            img = Image.new("RGB", (W, H), "white")
+            img.paste(self.base, (int(round(dx)), int(round(dy))))
+            self._show(img, 0, 0)
+        except Exception:
+            self._show(self.base, dx, dy)
+
+    def show_zoom(self, px, py, scale):
+        """
+        Зум: snapshot, масштабированный в 1/scale раз вокруг точки (px, py)
+        (scale < 1 — приближение). Для приближения вырезаем область и
+        растягиваем, для отдаления — сжимаем и кладём на белый фон.
+        """
+        if self.base is None:
+            return
+        try:
+            from PIL import Image
+            W, H = self.size
+            if scale <= 0:
+                return
+            if scale < 1.0:
+                box = (px - px * scale, py - py * scale,
+                       px + (W - px) * scale, py + (H - py) * scale)
+                img = self.base.crop(tuple(int(round(v)) for v in box)).resize((W, H), Image.BILINEAR)
+            else:
+                w2, h2 = max(1, int(round(W / scale))), max(1, int(round(H / scale)))
+                small = self.base.resize((w2, h2), Image.BILINEAR)
+                img = Image.new("RGB", (W, H), "white")
+                img.paste(small, (int(round(px - px / scale)), int(round(py - py / scale))))
+            self._show(img, 0, 0)
+        except Exception:
+            self.hide()
+
+    def hide(self):
+        if self.label is not None:
+            try:
+                self.label.place_forget()
+                self.label.destroy()
+            except Exception:
+                pass
+            self.label = None
+        self.photo = None
+        self.base = None
+
+
+# ═════════════════════════════════════════════════════════════
 #  ГЛАВНОЕ ОКНО
 # ═════════════════════════════════════════════════════════════
 
@@ -617,8 +731,10 @@ class App(tk.Tk):
         self._redraw_wanted = False
         self._loading = False
         self._pan = None
+        self._zoom = None                 # сессия зума колесом: {'px','py','scale'}
         self._tl_job = None
         self._incomplete_rows = 0
+        self._preview = None              # FramePreview (создаётся после холста)
         self._last_good = None            # последние настройки, которые построились без ошибок
 
         # Фоновая символика: ОДИН рабочий поток, пачки заданий (новые — первыми),
@@ -863,6 +979,19 @@ class App(tk.Tk):
         tk.Label(row3, textvariable=self.font_size_var, bg=CARD_BG, fg=ACCENT,
                  font=(UI_FONT, 9, "bold"), width=3).pack(side="left", padx=2)
 
+        # Шрифт графика (подписи точек/делений рисуются mathtext'ом этого пресета)
+        row4 = tk.Frame(dg, bg=CARD_BG); row4.pack(fill="x", pady=(2, 2))
+        tk.Label(row4, text="Graph font:", bg=CARD_BG, fg=SUBTEXT,
+                 font=(UI_FONT, 9)).pack(side="left", padx=(6, 4))
+        self.font_choice_var = tk.StringVar(value=FONT_CHOICES[0][0])
+        om = tk.OptionMenu(row4, self.font_choice_var, *[c[0] for c in FONT_CHOICES])
+        om.config(bg=ENTRY_BG, fg=TEXT, activebackground=CARD_BG, activeforeground=TEXT,
+                  relief="flat", font=(UI_FONT, 9), bd=0, highlightthickness=1,
+                  highlightbackground=BORDER, width=22)
+        om["menu"].config(bg=ENTRY_BG, fg=TEXT, activebackground=ACCENT, font=(UI_FONT, 9))
+        om.pack(side="left")
+        self.font_choice_var.trace_add("write", lambda *_: self._on_font_change())
+
         # ── Fill ─────────────────────────────────────────────
         self.fill_card = card(p, "Area Fill")
         card_pack(self.fill_card, fill="x", padx=12, pady=4)
@@ -890,6 +1019,21 @@ class App(tk.Tk):
 
         tk.Frame(p, bg=APP_BG, height=12).pack()
 
+    def _font_key(self):
+        label = self.font_choice_var.get()
+        return next((k for l, k in FONT_CHOICES if l == label), "times")
+
+    def _set_font_key(self, key):
+        label = next((l for l, k in FONT_CHOICES if k == key), FONT_CHOICES[0][0])
+        self.font_choice_var.set(label)
+
+    def _on_font_change(self):
+        try:
+            fv.apply_font_preset(self._font_key())
+        except Exception:
+            pass
+        self.schedule_redraw()
+
     def _live_int(self, value):
         var = tk.IntVar(value=value)
         var.trace_add("write", lambda *_: self.schedule_redraw())
@@ -916,6 +1060,7 @@ class App(tk.Tk):
         w.configure(bg="white", highlightthickness=0)
         w.pack(fill="both", expand=True)
         w.bind("<Configure>", self._on_canvas_resize)
+        self._preview = FramePreview(self.canvas)
 
         self.status = tk.Label(parent, text="", bg=APP_BG, fg=SUBTEXT,
                                font=(UI_FONT, 9), anchor="w")
@@ -1008,7 +1153,7 @@ class App(tk.Tk):
     # ══════════════════════════════════════════════════════════
     #  ЖИВАЯ ПЕРЕРИСОВКА
     # ══════════════════════════════════════════════════════════
-    def schedule_redraw(self, *_):
+    def schedule_redraw(self, *_, delay=None):
         """Отложенная перерисовка: множество изменений подряд → одна отрисовка."""
         if self._loading:
             return
@@ -1017,7 +1162,17 @@ class App(tk.Tk):
                 self.after_cancel(self._redraw_job)
             except Exception:
                 pass
-        self._redraw_job = self.after(REDRAW_DELAY_MS, self._redraw)
+        self._redraw_job = self.after(REDRAW_DELAY_MS if delay is None else delay, self._redraw)
+
+    def redraw_now(self):
+        """Немедленная перерисовка (минуя debounce) — после пана/зума."""
+        if self._redraw_job is not None:
+            try:
+                self.after_cancel(self._redraw_job)
+            except Exception:
+                pass
+            self._redraw_job = None
+        self._redraw()
 
     def _collect(self):
         """
@@ -1107,6 +1262,9 @@ class App(tk.Tk):
                 settings = self._collect()
             except ValueError as ex:
                 self._set_status(str(ex), ERR_COLOR)
+                if self._preview is not None:
+                    self._preview.hide()
+                self._zoom = None
                 return
             self._apply_to_engine(settings)
 
@@ -1125,7 +1283,16 @@ class App(tk.Tk):
             for idx, r in enumerate(self.func_rows):
                 if idx in errors and not r.is_empty():
                     r.editor.set_error(errors[idx])
-            self.canvas.draw_idle()
+            # Синхронная отрисовка: новый кадр готов сразу, и предпросмотр
+            # (сдвинутый/масштабированный старый кадр) можно убрать без «моргания».
+            try:
+                self.canvas.draw()
+            except Exception:
+                log_exception("canvas.draw")
+                self.canvas.draw_idle()
+            self._zoom = None
+            if self._preview is not None:
+                self._preview.hide()
 
             if result.get('pending'):
                 self._submit_jobs(fv.take_pending_jobs())
@@ -1241,7 +1408,8 @@ class App(tk.Tk):
     def _relayout(self):
         self._tl_job = None
         try:
-            self.fig.tight_layout()
+            if self._preview is not None:
+                self._preview.hide()
             self.canvas.draw_idle()
         except Exception:
             pass
@@ -1280,7 +1448,7 @@ class App(tk.Tk):
         except Exception:
             return None
 
-    def _set_limits(self, xl, xr, yb, yt):
+    def _set_limits(self, xl, xr, yb, yt, delay=None, immediate=False):
         def fmt(v):
             # 10 значащих цифр: обратное чтение из поля не теряет точность
             # при зуме/панорамировании вдали от начала координат
@@ -1292,7 +1460,10 @@ class App(tk.Tk):
             self.ylim_b.var.set(fmt(yb)); self.ylim_t.var.set(fmt(yt))
         finally:
             self._loading = False
-        self.schedule_redraw()
+        if immediate:
+            self.redraw_now()
+        else:
+            self.schedule_redraw(delay=delay)
 
     def _on_graph_scroll(self, event):
         if event.inaxes is None or event.xdata is None:
@@ -1325,7 +1496,27 @@ class App(tk.Tk):
                 return
         except Exception:
             pass
-        self._set_limits(nxl, nxr, nyb, nyt)
+        # Мгновенный предпросмотр: масштабируем последний кадр вокруг курсора;
+        # настоящая перерисовка придёт через ZOOM_DELAY_MS и заменит его.
+        self._zoom_preview(event, factor)
+        self._set_limits(nxl, nxr, nyb, nyt, delay=ZOOM_DELAY_MS)
+
+    def _zoom_preview(self, event, factor):
+        pv = self._preview
+        if pv is None:
+            return
+        try:
+            if self._zoom is None or not pv.active:
+                if not pv.snapshot():
+                    self._zoom = None
+                    return
+                W, H = pv.size
+                self._zoom = {"px": float(event.x), "py": float(H - event.y), "scale": 1.0}
+            z = self._zoom
+            z["scale"] *= factor
+            pv.show_zoom(z["px"], z["py"], z["scale"])
+        except Exception:
+            self._zoom = None
 
     def _on_graph_press(self, event):
         self._pan = None
@@ -1337,7 +1528,7 @@ class App(tk.Tk):
         if lims is None:
             return
         self._pan = {"x0": event.xdata, "y0": event.ydata, "px": event.x, "py": event.y,
-                     "lims": lims, "moved": False, "ax": event.inaxes}
+                     "lims": lims, "moved": False, "ax": event.inaxes, "preview": False}
 
     def _on_graph_motion(self, event):
         p = self._pan
@@ -1347,15 +1538,27 @@ class App(tk.Tk):
             return
         p["moved"] = True
         ax = p["ax"]
-        # переводим сдвиг в пикселях в единицы данных (по текущему масштабу осей)
+        # переводим сдвиг в пикселях в единицы данных (по масштабу осей на момент захвата)
         inv = ax.transData.inverted()
         x1, y1 = inv.transform((event.x, event.y))
         x0, y0 = inv.transform((p["px"], p["py"]))
         dx, dy = x1 - x0, y1 - y0
         xl, xr, yb, yt = p["lims"]
+        p["cur"] = (xl - dx, xr - dx, yb - dy, yt - dy)
+        # Предпросмотр: сдвигаем снимок кадра целиком (оси, сетка, подписи —
+        # всё едет вместе), никакой перерисовки до отпускания кнопки
+        pv = self._preview
+        if pv is not None:
+            if not p["preview"]:
+                p["preview"] = pv.snapshot()
+                if not p["preview"]:
+                    self._zoom = None
+            if p["preview"]:
+                pv.show_shift(event.x - p["px"], -(event.y - p["py"]))
+                return
+        # запасной вариант (нет снимка): дешёвый сдвиг осей
         ax.set_xlim(xl - dx, xr - dx)
         ax.set_ylim(yb - dy, yt - dy)
-        p["cur"] = (xl - dx, xr - dx, yb - dy, yt - dy)
         self.canvas.draw_idle()
 
     def _on_graph_release(self, event):
@@ -1368,8 +1571,12 @@ class App(tk.Tk):
             return
         cur = p.get("cur")
         if cur is None:
+            if self._preview is not None:
+                self._preview.hide()
             return
-        self._set_limits(*cur)
+        # Сразу строим новый кадр; предпросмотр остаётся на экране, пока он
+        # не готов, и убирается внутри _redraw после синхронного draw()
+        self._set_limits(*cur, immediate=True)
 
     def _reset_view(self):
         self._set_limits(-5, 5, -5, 5)
@@ -1406,6 +1613,7 @@ class App(tk.Tk):
                 "y_intercepts": self.v_ytag.get(), "intersections": self.v_inter.get(),
                 "show_values": self.v_show_values.get(), "hide_x": self.v_xhide.get(),
                 "hide_y": self.v_yhide.get(), "font_size": self.font_size_var.get(),
+                "font": self._font_key(),
             },
             "fills": [f.to_dict() for f in self.fill_rows],
             "free_texts": [dict(t) for t in fv.FREE_TEXTS],
@@ -1474,6 +1682,8 @@ class App(tk.Tk):
             self.v_show_values.set(int(d.get("show_values", 1)))
             self.v_xhide.set(int(d.get("hide_x", 0))); self.v_yhide.set(int(d.get("hide_y", 0)))
             self.font_size_var.set(int(d.get("font_size", 10)))
+            self._set_font_key(str(d.get("font", "times")))
+            fv.apply_font_preset(self._font_key())
 
             fv.FREE_TEXTS.clear()
             for t in data.get("free_texts", []):

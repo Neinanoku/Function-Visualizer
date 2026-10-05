@@ -83,7 +83,7 @@ _SETTINGS = ('FUNCS', 'FUNC_DOMAINS', 'CURVE_WIDTHS', 'CURVE_STYLES', 'FILL',
              'X_LIM_L', 'X_LIM_R', 'Y_LIM_B', 'Y_LIM_T',
              'GRID', 'X_GRID', 'Y_GRID',
              'ASIMP', 'DISC', 'EXTR', 'X_TAG', 'Y_TAG', 'INTER', 'SHOW_VALUES',
-             'X_HIDE', 'Y_HIDE', 'FONT_SIZE', 'SYMBOLIC_MODE')
+             'X_HIDE', 'Y_HIDE', 'FONT_SIZE', 'SYMBOLIC_MODE', 'MATHTEXT_LABELS')
 
 
 def _reset_engine():
@@ -99,6 +99,7 @@ def _reset_engine():
     fv.FONT_SIZE = 10
     fv.FREE_TEXTS.clear()
     fv.SYMBOLIC_MODE = 'compute'
+    fv.MATHTEXT_LABELS = False      # тесты сравнивают unicode-подписи
     fv.clear_symbolic_cache()
     fv.reset_annotation_offsets()
 
@@ -737,3 +738,44 @@ def test_fmt_sym_log_quotient_as_log_base():
     assert fv.fmt_sym(sp.log(3) / sp.log(2)) == "log₂(3)"
     assert fv.fmt_sym(sp.Rational(1, 2) + sp.log(3) / sp.log(2)) == "1/2+log₂(3)"
     assert fv.fmt_sym(sp.log(5)) == "ln(5)"
+
+
+def test_fmt_sym_tex_forms():
+    assert fv.fmt_sym_tex(sqrt(5)) == r"\sqrt{5}"
+    assert fv.fmt_sym_tex((sqrt(21) - 1) / 2) == r"\frac{\sqrt{21}-1}{2}"
+    assert fv.fmt_sym_tex(pi / 2) == r"\frac{\pi}{2}"
+    assert fv.fmt_sym_tex(-pi / 2) == r"-\frac{\pi}{2}"
+    assert fv.fmt_sym_tex(2 * pi / 3) == r"\frac{2\pi}{3}"
+    assert fv.fmt_sym_tex(Rational(-1, 2)) == r"-\frac{1}{2}"
+    assert fv.fmt_sym_tex(sqrt(2) / 2) == r"\frac{\sqrt{2}}{2}"
+    assert fv.fmt_sym_tex(log(3) / log(2)) == r"\log_{2}(3)"
+    assert fv.fmt_sym_tex(exp(2)) == r"e^{2}"
+    assert fv.fmt_sym_tex(Integer(2) ** Rational(1, 3)) == r"\sqrt[3]{2}"
+    assert fv.fmt_num(math.pi / 2, tex=True) == r"\frac{\pi}{2}"
+    assert fv.fmt_num(-4, tex=True) == "-4"
+
+
+def test_mathtext_labels_render():
+    """В режиме mathtext подписи с корнями/дробями — $…$, десятичные — обычный текст с минусом; всё рисуется."""
+    fv.MATHTEXT_LABELS = True
+    res = draw(["x^2-5", "sin(x)", "cos(x)", "x^2 + 5/x - sqrt(x^2+15)"])
+    assert res['errors'] == {}
+    texts = [t.get_text() for t in res['ax'].texts]
+    assert any(t == r"$(\sqrt{5},\ 0)$" for t in texts), texts
+    assert any(t == r"$(\frac{\pi}{4},\ \frac{\sqrt{2}}{2})$" for t in texts), texts
+    assert any(t == "(1.42, 1.41)" for t in texts), texts          # десятичные — без $
+    assert any(t == "\u22124" for t in texts), texts                 # деление -4 с настоящим минусом
+    assert "$x$" in texts and "$y$" in texts
+    res['fig'].canvas.draw()                                      # mathtext разбирается без ошибок
+    assert fv.math_label(r"\bad{") == r"\bad{"                      # некорректный фрагмент → обычный текст
+
+
+def test_font_presets_apply():
+    import matplotlib.pyplot as plt
+    for name in ("times", "latex", "serif", "sans", "century"):
+        fv.apply_font_preset(name)
+        assert fv.GRAPH_FONT == name
+        assert plt.rcParams['mathtext.fontset'] in ("stix", "cm", "dejavuserif", "dejavusans", "custom")
+    fv.apply_font_preset("nonsense")
+    assert fv.GRAPH_FONT == "times"
+    fv.apply_font_preset("times")

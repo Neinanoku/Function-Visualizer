@@ -19,6 +19,7 @@ simplify) проходят через кэш sym_cached(). В режиме SYMBO
 import logging
 import math
 import re
+import functools
 import threading
 
 import numpy as np
@@ -39,7 +40,66 @@ from scipy.optimize import brentq, minimize_scalar
 # Шрифт графика: список с запасными вариантами (Calibri есть только на
 # Windows; Carlito — его метрический аналог в Linux; DejaVu Sans — везде).
 # matplotlib принимает список семейств и берёт первый доступный.
-plt.rcParams['font.family'] = ['Calibri', 'Carlito', 'DejaVu Sans', 'sans-serif']
+# ── Шрифт графика и формат подписей ───────────────────────────
+# GRAPH_FONT — пресет шрифта (см. FONT_PRESETS): 'times' — Times New Roman +
+# математика STIX (Times-подобная), 'latex' — Computer Modern (вид LaTeX),
+# 'century' — Century Schoolbook (если установлен), 'serif' — DejaVu Serif,
+# 'sans' — Calibri/DejaVu Sans (старый вид).
+# MATHTEXT_LABELS — подписи точек/делений через mathtext matplotlib:
+# \sqrt{5}, \frac{\pi}{2} рисуются как настоящие корни и дроби; False —
+# обычные unicode-строки (√5, π/2).
+GRAPH_FONT = 'times'
+MATHTEXT_LABELS = True
+
+FONT_PRESETS = {
+    # имя: (список семейств для обычного текста, mathtext.fontset)
+    'times':   (['Times New Roman', 'Cambria', 'Liberation Serif', 'DejaVu Serif', 'serif'], 'stix'),
+    'latex':   (['CMU Serif', 'Latin Modern Roman', 'Times New Roman', 'Liberation Serif',
+                 'DejaVu Serif', 'serif'], 'cm'),
+    'century': (['Century Schoolbook', 'Century', 'TeX Gyre Schola', 'Times New Roman',
+                 'Liberation Serif', 'DejaVu Serif', 'serif'], 'custom'),
+    'serif':   (['DejaVu Serif', 'serif'], 'dejavuserif'),
+    'sans':    (['Calibri', 'Carlito', 'DejaVu Sans', 'sans-serif'], 'dejavusans'),
+}
+
+
+def _font_available(name):
+    try:
+        from matplotlib import font_manager
+        font_manager.findfont(font_manager.FontProperties(family=name), fallback_to_default=False)
+        return True
+    except Exception:
+        return False
+
+
+def apply_font_preset(name=None):
+    """Применяет пресет шрифта к rcParams (вызывается при смене настройки)."""
+    global GRAPH_FONT
+    name = name or GRAPH_FONT
+    families, fontset = FONT_PRESETS.get(name, FONT_PRESETS['times'])
+    GRAPH_FONT = name if name in FONT_PRESETS else 'times'
+    plt.rcParams['font.family'] = list(families)
+    if fontset == 'custom':
+        # «Свой» шрифт для математики: берём первое установленное семейство;
+        # недостающие глифы (√, π…) подставляет STIX.
+        fam = next((f for f in families if f not in ('serif', 'sans-serif')
+                    and _font_available(f)), None)
+        if fam is None:
+            fontset = 'stix'
+        else:
+            plt.rcParams['mathtext.fontset'] = 'custom'
+            plt.rcParams['mathtext.rm'] = fam
+            plt.rcParams['mathtext.it'] = f'{fam}:italic'
+            plt.rcParams['mathtext.bf'] = f'{fam}:bold'
+            try:
+                plt.rcParams['mathtext.fallback'] = 'stix'
+            except Exception:
+                pass
+    if fontset != 'custom':
+        plt.rcParams['mathtext.fontset'] = fontset
+
+
+apply_font_preset(GRAPH_FONT)
 # Не засорять консоль предупреждениями «findfont: Font family not found».
 logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
 
@@ -230,6 +290,12 @@ _SYM_TLS = threading.local()        # force_compute=True внутри run_jobs
 _DRAW_STATE = {'pending': False}    # было ли что-то отложено в текущем построении
 
 
+@functools.lru_cache(maxsize=1024)
+def _ekey(expr):
+    """str(expr) для ключей кэша — печать sympy дорогая, запоминаем."""
+    return str(expr)
+
+
 def sym_cached(key, fn):
     """
     Возвращает закэшированный результат fn() по ключу key (хэшируемый кортеж
@@ -321,6 +387,8 @@ def clear_symbolic_cache():
     _NUMPY_FUNC_CACHE.clear()
     _IMPLICIT_FUNC_CACHE.clear()
     _ENUM_CACHE.clear()
+    _FINITE_FLOATS.clear()
+    _ekey.cache_clear()
 
 
 # ══════════════════════════════════════════════════════════════
@@ -599,20 +667,20 @@ def _scan_roots_1d(g, lo, hi, n=2000, xtol=1e-12):
         if not any(abs(r - e) < 1e-6 for e in roots):
             roots.append(r)
 
-    for i in range(len(ts) - 1):
-        a, b = ts[i], ts[i + 1]
-        fa, fb = vals[i], vals[i + 1]
-        if not (np.isfinite(fa) and np.isfinite(fb)):
-            continue
-        if fa == 0.0:
-            _add(a)
-        if fa * fb < 0:
-            try:
-                r = brentq(lambda t: _safe_scalar(g, t), a, b, xtol=xtol)
-                if np.isfinite(r):
-                    _add(r)
-            except Exception:
-                pass
+    va, vb = vals[:-1], vals[1:]
+    with np.errstate(invalid='ignore', over='ignore'):
+        both = finite[:-1] & finite[1:]
+        zero_at = np.where(both & (va == 0.0))[0]
+        cross = np.where(both & (va * vb < 0))[0]
+    for i in zero_at:
+        _add(ts[i])
+    for i in cross:
+        try:
+            r = brentq(lambda t: _safe_scalar(g, t), ts[i], ts[i + 1], xtol=xtol)
+            if np.isfinite(r):
+                _add(r)
+        except Exception:
+            pass
     # правый конец
     if len(vals) and vals[-1] == 0.0:
         _add(ts[-1])
@@ -645,10 +713,14 @@ def intersect_func_implicit(f, h, x_lo, x_hi, y_lo, y_hi):
     те точки, чья y=f(x) попадает в окно.
     """
     def g(t):
-        yv = _safe_scalar(f, t)
-        if not np.isfinite(yv):
-            return np.nan
-        return _safe_scalar(lambda _: h(t, yv), 0.0)
+        # работает и со скаляром (brentq), и с массивом (_scan_roots_1d → _eval_array)
+        t_arr = np.asarray(t, dtype=float)
+        with np.errstate(all='ignore'):
+            yv = _eval_array(f, np.atleast_1d(t_arr))
+            out = np.asarray(h(np.atleast_1d(t_arr), yv), dtype=float)
+            out = np.array(np.broadcast_to(out, yv.shape), dtype=float)
+            out[~np.isfinite(yv)] = np.nan
+        return float(out[0]) if t_arr.ndim == 0 else out
     pts = []
     for xr in _scan_roots_1d(g, x_lo, x_hi):
         yv = _safe_scalar(f, xr)
@@ -747,7 +819,8 @@ def _safe_val(f, x):
 #  МНОЖЕСТВА SYMPY → ВЕЩЕСТВЕННЫЕ ТОЧКИ В ОКНЕ
 # ══════════════════════════════════════════════════════════════
 
-_ENUM_CACHE = {}        # (str(set), lo, hi) -> [(float, exact), ...]
+_ENUM_CACHE = {}        # (set, lo, hi) -> [(float, exact), ...]
+_FINITE_FLOATS = {}     # FiniteSet -> [(float | None, exact), ...]
 _ENUM_CACHE_LIMIT = 2000
 
 
@@ -794,27 +867,51 @@ def _enumerate_real_set(sset, lo, hi, nice=None, n_range=60, max_count=400):
     """
     if sset is None:
         return []
-    ck = (str(sset), float(lo), float(hi))
-    hit = _ENUM_CACHE.get(ck)
+    # Ключ — сам объект множества (хэш sympy кэширует), а не str(sset):
+    # печать больших множеств стоила десятки миллисекунд на каждую перерисовку.
+    try:
+        ck = (sset, float(lo), float(hi))
+        hit = _ENUM_CACHE.get(ck)
+    except Exception:
+        ck, hit = None, None
     if hit is not None:
         return list(hit)
     eps = 1e-9 * max(1.0, abs(hi - lo))
     out = []
 
-    def _add(c):
+    def _add(c, v=None):
         if nice:
             c = nice.get(c, c)
-        v = _real_float(c)
+        if v is None:
+            v = _real_float(c)
         if v is None:
             return
         if lo - eps <= v <= hi + eps:
             if not any(abs(v - w) < 1e-9 for w, _ in out):
                 out.append((v, c))
 
+    def _finite_floats(fs):
+        # float каждого элемента конечного множества считаем один раз
+        # (evalf — самая дорогая часть), окно фильтруем уже по числам
+        try:
+            hit_f = _FINITE_FLOATS.get(fs)
+        except Exception:
+            hit_f = None
+        if hit_f is None:
+            hit_f = [(_real_float(nice.get(c, c) if nice else c), c) for c in fs.args]
+            try:
+                if len(_FINITE_FLOATS) >= _ENUM_CACHE_LIMIT:
+                    _FINITE_FLOATS.clear()
+                _FINITE_FLOATS[fs] = hit_f
+            except Exception:
+                pass
+        return hit_f
+
     try:
         if isinstance(sset, FiniteSet):
-            for c in sset.args:
-                _add(c)
+            for v, c in _finite_floats(sset):
+                if v is not None:
+                    _add(c, v)
         elif isinstance(sset, Union):
             for a in sset.args:
                 out.extend(_enumerate_real_set(a, lo, hi, nice, n_range, max_count))
@@ -855,7 +952,8 @@ def _enumerate_real_set(sset, lo, hi, nice=None, n_range=60, max_count=400):
                             k_hi = int(math.floor(max(k1, k2) + 1e-9))
                             if k_hi - k_lo + 1 <= max_count:
                                 for k in range(k_lo, k_hi + 1):
-                                    _add(e.subs(nsym, Integer(k)))
+                                    # значение — арифметикой (без evalf), точная форма — подстановкой
+                                    _add(e.subs(nsym, Integer(k)), a * k + b)
                             done = True
                 except Exception:
                     done = False
@@ -867,9 +965,10 @@ def _enumerate_real_set(sset, lo, hi, nice=None, n_range=60, max_count=400):
         pass
 
     out.sort(key=lambda p: p[0])
-    if len(_ENUM_CACHE) >= _ENUM_CACHE_LIMIT:
-        _ENUM_CACHE.clear()
-    _ENUM_CACHE[ck] = list(out)
+    if ck is not None:
+        if len(_ENUM_CACHE) >= _ENUM_CACHE_LIMIT:
+            _ENUM_CACHE.clear()
+        _ENUM_CACHE[ck] = list(out)
     return out
 
 
@@ -891,7 +990,7 @@ def find_discontinuities_numerical(f, expr_sympy, expr_raw, x_lim_l, x_lim_r,
 
     tried = set()
     for expr_candidate in [expr_raw, expr_sympy]:
-        key = ('sing', str(expr_candidate))
+        key = ('sing', _ekey(expr_candidate))
         if key in tried:
             continue
         tried.add(key)
@@ -956,7 +1055,7 @@ def classify_discontinuities(f, expr_sympy, disc_pts, y_lim_b, y_lim_t,
         pt_exact = exact_pts.get(dp) if exact_pts else None
         pt_arg = pt_exact if pt_exact is not None else dp
         try:
-            key_base = ('lim', str(expr_sympy), str(pt_arg))
+            key_base = ('lim', _ekey(expr_sympy), str(pt_arg))
             # ВАЖНО: точку связываем параметром по умолчанию — в режиме
             # 'cached' лямбда выполняется позже, когда переменная цикла уже
             # указывает на последнюю точку.
@@ -1002,7 +1101,7 @@ def find_horizontal_asymptotes(f, expr_sympy, x_lim_l, x_lim_r, y_lim_b, y_lim_t
     for direction in [oo, -oo]:
         val = None
         try:
-            lv = sym_cached(('lim', str(expr_sympy), str(direction), ''),
+            lv = sym_cached(('lim', _ekey(expr_sympy), str(direction), ''),
                             lambda d=direction: limit(expr_sympy, x_sym, d))
             if lv not in (oo, -oo, zoo, nan) and lv.is_real:
                 val = float(lv)
@@ -1105,11 +1204,16 @@ def snap_to_nice(val, tol_pct=0.02, allow_pi=True, allow_e=True):
     return val
 
 
-def fmt_num(val, tol=1e-4):
+def fmt_num(val, tol=1e-4, tex=False):
+    """
+    Подпись деления оси / десятичное число: кратные π (знаменатели 1,2,3,4,6)
+    и e — символьно, иначе {val:g}. tex=True — фрагмент mathtext.
+    """
     import math
     from math import gcd
     PI = math.pi
     E  = math.e
+    PI_S = '\\pi' if tex else 'π'
 
     # Кратные π с «хорошими» знаменателями: 1, 2, 3, 4, 6.
     # Проверяем их от большего знаменателя к меньшему и берём первое
@@ -1132,9 +1236,10 @@ def fmt_num(val, tol=1e-4):
         sign = '-' if num < 0 else ''
         coef = '' if abs(num) == 1 else str(abs(num))
         if den == 1:
-            return f'{sign}{coef}π'
-        else:
-            return f'{sign}{coef}π/{den}'
+            return f'{sign}{coef}{PI_S}'
+        if tex:
+            return f'{sign}\\frac{{{coef}{PI_S}}}{{{den}}}'
+        return f'{sign}{coef}π/{den}'
 
     ratio_e = val / E
     n_e = round(ratio_e)
@@ -1143,7 +1248,52 @@ def fmt_num(val, tol=1e-4):
         if n_e == -1: return '-e'
         return f'{n_e}e'
 
-    return f'{val:g}'
+    return _dec_tex(f'{val:g}') if tex else f'{val:g}'
+
+
+def _dec_tex(s):
+    """Десятичная строка → фрагмент mathtext (1e-05 → 1\\cdot10^{-5})."""
+    if 'e' in s or 'E' in s:
+        m, _, ex = s.lower().partition('e')
+        try:
+            return f'{m}\\cdot10^{{{int(ex)}}}'
+        except ValueError:
+            return s
+    return s
+
+
+@functools.lru_cache(maxsize=4096)
+def _mathtext_ok(text):
+    """Проверка, что строка разбирается mathtext (иначе рисуем как обычный текст)."""
+    try:
+        from matplotlib.mathtext import MathTextParser
+        MathTextParser('path').parse(text, dpi=72, prop=None)
+        return True
+    except Exception:
+        return False
+
+
+def tick_label(v):
+    """Подпись деления оси (mathtext при MATHTEXT_LABELS)."""
+    return math_label(fmt_num(v, tex=True)) if MATHTEXT_LABELS else fmt_num(v)
+
+
+_TEX_PLAIN_RE = re.compile(r'^[0-9.,()+\-\\ e]*$')
+
+
+def math_label(frag):
+    """
+    Оборачивает фрагмент в $…$ (если MATHTEXT_LABELS и строка корректна).
+    Фрагменты из одних цифр/знаков/скобок (например «(2.76, 3.76)» или «-4»)
+    рисуем ОБЫЧНЫМ текстом тем же serif-шрифтом с настоящим минусом:
+    раскладка mathtext стоит ~5 мс на подпись, а выглядит так же.
+    """
+    if not MATHTEXT_LABELS:
+        return frag
+    if '\\' not in frag.replace('\\ ', ' ') and _TEX_PLAIN_RE.match(frag):
+        return frag.replace('\\ ', ' ').replace('-', '\u2212')
+    t = f'${frag}$'
+    return t if _mathtext_ok(t) else frag
 
 
 def parse_number(s, default=None):
@@ -1269,7 +1419,7 @@ def exact_candidates(expr, x_sym, kind, x_lo=None, x_hi=None):
         x_lo = X_LIM_L
     if x_hi is None:
         x_hi = X_LIM_R
-    key = ('roots' if kind == 'roots' else 'crit', str(expr), str(x_sym))
+    key = ('roots' if kind == 'roots' else 'crit', _ekey(expr), str(x_sym))
 
     def job():
         target = expr if kind == 'roots' else diff(expr, x_sym)
@@ -1468,7 +1618,7 @@ def exact_y_of(expr, x_sym, cx):
         # минуты, а «простым» результат всё равно не станет — не пытаемся.
         if count_ops(e) > 40:
             return None
-        s = sym_cached(('simp', str(e)), lambda: simplify(e))
+        s = sym_cached(('simp', _ekey(e)), lambda: simplify(e))
         if s.free_symbols or s.has(oo, -oo, zoo, nan):
             return None
         return s if fmt_sym(s) is not None else None
@@ -1491,37 +1641,47 @@ def _sup(k):
     return str(int(k)).translate(_SUP_TRANS)
 
 
-def _fmt_base(b):
-    """Строка для иррационального множителя (π, e, eⁿ, √n, ∛n, ln(q)) или None."""
+def _fmt_base(b, tex=False):
+    """
+    Строка для иррационального множителя (π, e, eⁿ, √n, ∛n, ln(q)) или None.
+    tex=True — фрагмент mathtext (\\pi, e^{2}, \\sqrt{5}, \\sqrt[3]{2}, \\ln(5)).
+    """
+    def powtxt(base_s, k):
+        return f'{base_s}^{{{int(k)}}}' if tex else base_s + _sup(k)
+
     if b is pi:
-        return 'π'
+        return '\\pi' if tex else 'π'
     if b is E:
         return 'e'
     if isinstance(b, exp):
         k = b.args[0]
         if k.is_Integer and 1 <= int(k) <= 9:
-            return 'e' if int(k) == 1 else 'e' + _sup(k)
+            return 'e' if int(k) == 1 else powtxt('e', k)
         return None
     if b.is_Pow:
         base, ex = b.args
         if base is pi and ex.is_Integer and 2 <= int(ex) <= 9:
-            return 'π' + _sup(ex)
+            return powtxt('\\pi' if tex else 'π', ex)
         if base is E and ex.is_Integer and 2 <= int(ex) <= 9:
-            return 'e' + _sup(ex)
+            return powtxt('e', ex)
         if (base.is_Integer and int(base) > 1 and int(base) <= _FMT_INT_MAX
                 and ex.is_Rational and ex.p == 1 and ex.q in _ROOT_SIGNS):
+            if tex:
+                idx = '' if ex.q == 2 else f'[{ex.q}]'
+                return f'\\sqrt{idx}{{{int(base)}}}'
             return _ROOT_SIGNS[ex.q] + str(int(base))
         return None
     if b.func is log and len(b.args) == 1:
         a = b.args[0]
         if a.is_Rational and a > 0 and a != 1 \
                 and abs(a.p) <= _FMT_INT_MAX and a.q <= _FMT_INT_MAX:
-            return 'ln(' + (str(a.p) if a.q == 1 else f'{a.p}/{a.q}') + ')'
+            arg = str(a.p) if a.q == 1 else (f'\\frac{{{a.p}}}{{{a.q}}}' if tex else f'{a.p}/{a.q}')
+            return ('\\ln(' if tex else 'ln(') + arg + ')'
         return None
     return None
 
 
-def _fmt_term(t):
+def _fmt_term(t, tex=False):
     """
     Разбирает слагаемое c·B₁·B₂/(q·B₃): возвращает (знак, числитель,
     знаменатель_строка, q) или None. q — целый знаменатель коэффициента.
@@ -1535,13 +1695,13 @@ def _fmt_term(t):
     if rest != 1:
         for fac in Mul.make_args(rest):
             if fac.is_Pow and fac.args[1].is_negative:
-                s = _fmt_base(fac.args[0] ** (-fac.args[1]))
+                s = _fmt_base(fac.args[0] ** (-fac.args[1]), tex)
                 target = den_f
             elif isinstance(fac, exp) and fac.args[0].is_negative:
-                s = _fmt_base(exp(-fac.args[0]))
+                s = _fmt_base(exp(-fac.args[0]), tex)
                 target = den_f
             else:
-                s = _fmt_base(fac)
+                s = _fmt_base(fac, tex)
                 target = num_f
             if s is None:
                 return None
@@ -1554,16 +1714,24 @@ def _fmt_term(t):
     return sign_, num, den_f, q
 
 
-def _join_den(q, den_f):
+def _join_den(q, den_f, tex=False):
     parts = ([str(q)] if q > 1 else []) + list(den_f)
     if not parts:
         return ''
     s = ''.join(parts)
+    if tex:
+        return s
     return '(' + s + ')' if len(parts) > 1 else s
+
+
+def _frac_txt(num, den, tex):
+    """num/den: в tex — \\frac{num}{den}, иначе num/den."""
+    return f'\\frac{{{num}}}{{{den}}}' if tex else f'{num}/{den}'
 
 
 _SUB_TRANS = str.maketrans('0123456789', '₀₁₂₃₄₅₆₇₈₉')
 _LOG_QUOT_RE = re.compile(r'ln\((\d+)\)/ln\((\d+)\)')
+_LOG_QUOT_TEX_RE = re.compile(r'\\frac\{\\ln\((\d+)\)\}\{\\ln\((\d+)\)\}')
 
 
 def fmt_sym(expr):
@@ -1573,14 +1741,25 @@ def fmt_sym(expr):
     Возвращает None, если выражение не из этого класса (вызывающий печатает
     десятичную запись).
     """
-    out = _fmt_sym_core(expr)
+    out = _fmt_sym_core(expr, tex=False)
     if out is None:
         return None
     # ln(a)/ln(b) — это log_b(a): так короче и привычнее (корень 2^x = 3 → log₂(3))
     return _LOG_QUOT_RE.sub(lambda m: f"log{m.group(2).translate(_SUB_TRANS)}({m.group(1)})", out)
 
 
-def _fmt_sym_core(expr):
+def fmt_sym_tex(expr):
+    """
+    То же, что fmt_sym, но фрагмент mathtext (без $): \\sqrt{5},
+    \\frac{\\pi}{2}, \\frac{1+\\sqrt{13}}{2}, \\log_{2}(3), e^{2} …
+    """
+    out = _fmt_sym_core(expr, tex=True)
+    if out is None:
+        return None
+    return _LOG_QUOT_TEX_RE.sub(lambda m: f"\\log_{{{m.group(2)}}}({m.group(1)})", out)
+
+
+def _fmt_sym_core(expr, tex=False):
     try:
         expr = sympify(expr)
         if expr.free_symbols or expr.is_Float or expr.has(oo, -oo, zoo, nan):
@@ -1591,20 +1770,24 @@ def _fmt_sym_core(expr):
         if expr.is_Rational:
             if abs(expr.p) > _FMT_INT_MAX or expr.q > _FMT_INT_MAX:
                 return None
-            return f'{expr.p}/{expr.q}'
+            sgn = '-' if expr.p < 0 else ''
+            return sgn + _frac_txt(abs(expr.p), expr.q, tex)
         terms = Add.make_args(expr)
         if len(terms) > 3:
             return None
         parsed = []
         for t in terms:
-            pt = _fmt_term(t)
+            pt = _fmt_term(t, tex)
             if pt is None:
                 return None
             parsed.append(pt)
 
         def term_str(pt, lead):
             sign_, num, den_f, q = pt
-            body = num + ('/' + _join_den(q, den_f) if (q > 1 or den_f) else '')
+            if q > 1 or den_f:
+                body = _frac_txt(num, _join_den(q, den_f, tex), tex)
+            else:
+                body = num
             if lead:
                 return ('-' if sign_ < 0 else '') + body
             return ('-' if sign_ < 0 else '+') + body
@@ -1639,22 +1822,23 @@ def _fmt_sym_core(expr):
                     coef = (int(digits) if digits else 1) * mult
                     body = ('' if (coef == 1 and tail) else str(coef)) + tail
                     inner += ('-' if sign_ < 0 else ('' if i == 0 else '+')) + body
-                return f'({inner})/{d}'
+                return _frac_txt(inner, d, tex) if tex else f'({inner})/{d}'
 
         return ''.join(term_str(pt, i == 0) for i, pt in enumerate(parsed))
     except Exception:
         return None
 
 
-def fmt_exact_or(v, c=None, dec=None):
+def fmt_exact_or(v, c=None, dec=None, tex=False):
     """
     Текст координаты: точная форма c (если задана, форматируется и
     согласуется с v), иначе десятичная запись dec(v) (по умолчанию fmt_num).
+    tex=True — фрагмент mathtext.
     """
     if c is not None:
         try:
             if _exact_matches(c, v):
-                s = fmt_sym(c)
+                s = fmt_sym_tex(c) if tex else fmt_sym(c)
                 if s is not None:
                     return s
         except Exception:
@@ -1796,18 +1980,18 @@ def find_x_intercepts(f, x_vals, y_vals, disc_pts, allow_pi=True, allow_e=True):
                 return False
         return True
 
-    for i in range(n - 1):
-        y0, y1 = y_vals[i], y_vals[i + 1]
-        x0, x1 = x_vals[i], x_vals[i + 1]
-        if not (np.isfinite(y0) and np.isfinite(y1)):
-            continue
-        if y0 == 0.0:
-            if isolated_zero(i):
-                add_zero(x0)
-            continue
-        if y0 * y1 < 0:
+    if n >= 2:
+        ya, yb = y_vals[:-1], y_vals[1:]
+        with np.errstate(invalid='ignore', over='ignore'):
+            finite = np.isfinite(ya) & np.isfinite(yb)
+            zero_at = np.where(finite & (ya == 0.0))[0]
+            cross = np.where(finite & (ya * yb < 0))[0]
+        for i in zero_at:
+            if isolated_zero(int(i)):
+                add_zero(x_vals[i])
+        for i in cross:
             try:
-                xz = brentq(fscalar, x0, x1, xtol=1e-12)
+                xz = brentq(fscalar, x_vals[i], x_vals[i + 1], xtol=1e-12)
                 add_zero(xz)
             except Exception:
                 pass
@@ -1876,25 +2060,24 @@ def find_intersections(f1, f2, x_vals, y1_vals, y2_vals, disc_pts_x):
 
     abs_diff = np.abs(diff_arr)
 
-    for i in range(len(diff_arr) - 1):
-        d0, d1 = diff_arr[i], diff_arr[i + 1]
-        x0, x1 = x_vals[i], x_vals[i + 1]
-        if not (np.isfinite(d0) and np.isfinite(d1)):
-            continue
-
+    if len(diff_arr) >= 2:
+        da, db = diff_arr[:-1], diff_arr[1:]
+        with np.errstate(invalid='ignore', over='ignore'):
+            finite = np.isfinite(da) & np.isfinite(db)
+            zero_at = np.where(finite & (da == 0.0))[0]
+            cross = np.where(finite & (da * db < 0))[0]
         # Точное совпадение в узле сетки — только изолированное (соседние
         # узлы ненулевые), иначе кривые совпадают на отрезке и подписывать
         # каждый узел бессмысленно
-        if d0 == 0.0:
+        for i in zero_at:
+            i = int(i)
             prev_ok = (i == 0) or (np.isfinite(diff_arr[i - 1]) and diff_arr[i - 1] != 0.0)
-            if prev_ok and d1 != 0.0:
-                add_point(x0)
-            continue
-
+            if prev_ok and diff_arr[i + 1] != 0.0:
+                add_point(x_vals[i])
         # Случай 1: знакосмена → обычное пересечение
-        if d0 * d1 < 0:
+        for i in cross:
             try:
-                xz = brentq(diff_f, x0, x1, xtol=1e-12)
+                xz = brentq(diff_f, x_vals[i], x_vals[i + 1], xtol=1e-12)
                 add_point(xz)
             except Exception:
                 pass
@@ -1953,7 +2136,12 @@ class DraggableAnnotation:
     # это событие себе, а остальные при том же press видят, что оно уже
     # занято, и не реагируют. Ключ — сам объект события (у каждого клика
     # он свой), чтобы замок автоматически «сбрасывался» на следующем клике.
-    _press_claimed_by = {}   # id(event) -> DraggableAnnotation
+    # Держим сам объект события (сильная ссылка): пока он жив, его адрес
+    # не может достаться новому событию. Раньше ключом был id(event), а
+    # Python переиспользует id освобождённых объектов — следующий клик
+    # получал тот же id, считался «уже захваченным» и перетаскивание
+    # переставало работать после первого раза.
+    _claimed_event = None    # последнее захваченное событие press
 
     def __init__(self, annotation, key=None, home=None, pt_scale=None):
         # key      — ключ в ANNOTATION_OFFSETS (None — не запоминать);
@@ -1986,18 +2174,14 @@ class DraggableAnnotation:
             return
         # Если этот же клик уже захвачен другой подписью — не реагируем,
         # чтобы перетаскивалась ровно одна точка, а не все под курсором.
-        if id(event) in DraggableAnnotation._press_claimed_by:
+        if DraggableAnnotation._claimed_event is event:
             return
         # Проверяем попадание курсора в бокс аннотации
         contains, _ = self.ann.contains(event)
         if not contains:
             return
         # Забираем это событие себе (замок до следующего клика)
-        DraggableAnnotation._press_claimed_by[id(event)] = self
-        # Подчищаем старые записи, чтобы словарь не рос бесконечно
-        if len(DraggableAnnotation._press_claimed_by) > 8:
-            for k in list(DraggableAnnotation._press_claimed_by)[:-1]:
-                DraggableAnnotation._press_claimed_by.pop(k, None)
+        DraggableAnnotation._claimed_event = event
         # Запоминаем начальное положение текста (в координатах данных)
         self.press = (event.xdata, event.ydata,
                       self.ann.get_position())  # (mouse_x, mouse_y, ann_xy)
@@ -2611,10 +2795,10 @@ def plot_function(fig=None):
                 arrowprops=dict(arrowstyle='->', color=LABEL_COLOR,
                                 lw=1.2, mutation_scale=12), zorder=4)
 
-    _axis_label_x = ax.text(X_LIM_R, x_axis_y, "x",
+    _axis_label_x = ax.text(X_LIM_R, x_axis_y, "$x$" if MATHTEXT_LABELS else "x",
                 ha='left', va='center', fontsize=AXIS_FS, color=LABEL_COLOR,
                 clip_on=False, zorder=6)
-    _axis_label_y = ax.text(y_axis_x, Y_LIM_T, "y",
+    _axis_label_y = ax.text(y_axis_x, Y_LIM_T, "$y$" if MATHTEXT_LABELS else "y",
                 ha='center', va='bottom', fontsize=AXIS_FS, color=LABEL_COLOR,
                 clip_on=False, zorder=6)
     # Домашние смещения (в пунктах) — то, что раньше было в xytext.
@@ -2634,26 +2818,28 @@ def plot_function(fig=None):
     for v in make_ticks(X_LIM_L, X_LIM_R, X_GRID):
         if not X_HIDE:
             ax.plot(v, x_axis_y, '|', color=LABEL_COLOR, markersize=4, markeredgewidth=0.8, zorder=5)
-            ax.annotate(fmt_num(v), xy=(v, x_axis_y),
+            ax.annotate(tick_label(v), xy=(v, x_axis_y),
                         xytext=(0, -6), textcoords='offset points',
                         ha='center', va='top', fontsize=TICK_FS, color=LABEL_COLOR)
 
     for v in make_ticks(Y_LIM_B, Y_LIM_T, Y_GRID):
         if not Y_HIDE:
             ax.plot(y_axis_x, v, '_', color=LABEL_COLOR, markersize=4, markeredgewidth=0.8, zorder=5)
-            ax.annotate(fmt_num(v), xy=(y_axis_x, v),
+            ax.annotate(tick_label(v), xy=(y_axis_x, v),
                         xytext=(-6, 0), textcoords='offset points',
                         ha='right', va='center', fontsize=TICK_FS, color=LABEL_COLOR)
 
     # ── Вспомогательные функции подписи ──────────
+    TEX = bool(MATHTEXT_LABELS)
+
     def fmt2(v):
         """Десятичная запись координаты (2 знака); кратные π/e — через fmt_num."""
         if abs(v) < 1e-12:
             return '0'
         # fmt_num распознаёт кратные π (знаменатели 1,2,3,4,6) и e; численные
         # значения теперь точны до ~1e-10, поэтому допуск узкий.
-        s = fmt_num(v, tol=1e-9)
-        if 'π' in s or 'e' in s:
+        s = fmt_num(v, tol=1e-9, tex=TEX)
+        if 'π' in s or 'pi' in s or 'e' in s:
             return s
         s = f'{v:.2f}'
         s = s.rstrip('0').rstrip('.')
@@ -2663,10 +2849,17 @@ def plot_function(fig=None):
 
     def coord(v, c=None):
         """Текст одной координаты: точная форма c (если есть и согласуется), иначе fmt2."""
-        return fmt_exact_or(v, c, dec=fmt2)
+        return fmt_exact_or(v, c, dec=fmt2, tex=TEX)
+
+    def pt_label(xs, ys):
+        """Подпись точки из двух готовых фрагментов координат."""
+        if TEX:
+            return math_label(f"({xs},\\ {ys})")
+        return f"({xs}, {ys})"
 
     def label_xy(px, py, cx=None, cy=None):
-        return f"({coord(px, cx)}, {coord(py, cy)})"
+        return pt_label(coord(px, cx), coord(py, cy))
+
 
     draggables = _ACTIVE_DRAGGABLES
 
@@ -2770,12 +2963,12 @@ def plot_function(fig=None):
     def exact_root(v, expr, sym, cand_list, tag):
         return identify_value(v, cand_list,
                               verify=lambda c: _is_zero_at(expr, sym, c),
-                              cache_key=(tag, str(expr), str(sym)))
+                              cache_key=(tag, _ekey(expr), str(sym)))
 
     def exact_crit(v, expr, sym, cand_list):
         return identify_value(v, cand_list,
                               verify=lambda c: _is_zero_at(diff(expr, sym), sym, c),
-                              tol=1e-7, cache_key=('crit', str(expr), str(sym)))
+                              tol=1e-7, cache_key=('crit', _ekey(expr), str(sym)))
 
     # ══════════════════════════════════════════════
     #  ЦИКЛ ПО ФУНКЦИЯМ
@@ -2809,7 +3002,7 @@ def plot_function(fig=None):
             # Подпись точки пересечения с осью X: (c, 0)
             if X_TAG and Y_LIM_B <= 0 <= Y_LIM_T:
                 if SHOW_VALUES:
-                    annotate_point(cx, 0.0, f'({coord(cx, cx_exact)}, 0)',
+                    annotate_point(cx, 0.0, pt_label(coord(cx, cx_exact), '0'),
                                    above=True, color=color)
                 mark_point(cx, 0, color, markersize=5, zorder=8)
         func_data.append((None, None, color))
@@ -2859,7 +3052,7 @@ def plot_function(fig=None):
                 xe = exact_root(xr, Hx0, _X_SYM, cx_list, 'root')
                 mark_point(xr, 0.0, color, markersize=5, zorder=8)
                 if SHOW_VALUES:
-                    annotate_point(xr, 0.0, f'({coord(xr, xe)}, 0)',
+                    annotate_point(xr, 0.0, pt_label(coord(xr, xe), '0'),
                                    above=True, color=color)
         if Y_TAG and (X_LIM_L <= 0 <= X_LIM_R):
             gy = lambda t: h(0.0, t)
@@ -2869,7 +3062,7 @@ def plot_function(fig=None):
                 ye = exact_root(yr, H0y, _Y_SYM, cy_list, 'root')
                 mark_point(0.0, yr, color, markersize=5, zorder=8)
                 if SHOW_VALUES:
-                    annotate_point(0.0, yr, f'(0, {coord(yr, ye)})',
+                    annotate_point(0.0, yr, pt_label('0', coord(yr, ye)),
                                    above=True, color=color, side='right')
         func_data.append((None, None, color))
         curve_meta.append({'kind': 'implicit', 'color': color, 'h': h, 'H': H_sym})
@@ -2983,7 +3176,7 @@ def plot_function(fig=None):
                 mark_point(xi, x_axis_y, color)
                 if SHOW_VALUES:
                     xi_e = exact_root(xi, expr, x_sym, root_cands, 'root')
-                    txt = f"({coord(xi, xi_e)}, 0)"
+                    txt = pt_label(coord(xi, xi_e), '0')
                     if abs(xi - y_axis_x) < ON_Y_AXIS_TOL:
                         annotate_point(xi, x_axis_y, txt,
                                        above=True, color=color, side=choose_side(xi, x_axis_y, f))
@@ -2997,7 +3190,7 @@ def plot_function(fig=None):
             mark_point(y_axis_x, y_intercept, color)
             if SHOW_VALUES:
                 yi_e = exact_y_of(expr, x_sym, Integer(0))
-                annotate_point(y_axis_x, y_intercept, f"(0, {coord(y_intercept, yi_e)})",
+                annotate_point(y_axis_x, y_intercept, pt_label('0', coord(y_intercept, yi_e)),
                                above=True, color=color,
                                side=choose_side(y_axis_x, y_intercept, f))
 
@@ -3333,7 +3526,9 @@ def plot_function(fig=None):
         plt.show()
     else:
         try:
-            fig.tight_layout()
+            # Фиксированные поля вместо tight_layout: он измеряет каждый
+            # текст рендерером и стоил ~100–200 мс на перерисовку.
+            fig.subplots_adjust(left=0.03, right=0.97, bottom=0.03, top=0.97)
         except Exception:
             pass
 
