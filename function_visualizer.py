@@ -18,6 +18,7 @@ simplify) проходят через кэш sym_cached(). В режиме SYMBO
 
 import logging
 import math
+import re
 import threading
 
 import numpy as np
@@ -1561,13 +1562,25 @@ def _join_den(q, den_f):
     return '(' + s + ')' if len(parts) > 1 else s
 
 
+_SUB_TRANS = str.maketrans('0123456789', '₀₁₂₃₄₅₆₇₈₉')
+_LOG_QUOT_RE = re.compile(r'ln\((\d+)\)/ln\((\d+)\)')
+
+
 def fmt_sym(expr):
     """
     Компактная unicode-запись точного числа: 3, -1/2, π, 2π/3, -π/2, e, 2e,
-    e², √2, 2√3, √2/2, -√3/2, ∛2, 1+√2, (1+√13)/2, 1+ln(5), 2/π …
+    e², √2, 2√3, √2/2, -√3/2, ∛2, 1+√2, (1+√13)/2, 1+ln(5), 2/π, log₂(3) …
     Возвращает None, если выражение не из этого класса (вызывающий печатает
     десятичную запись).
     """
+    out = _fmt_sym_core(expr)
+    if out is None:
+        return None
+    # ln(a)/ln(b) — это log_b(a): так короче и привычнее (корень 2^x = 3 → log₂(3))
+    return _LOG_QUOT_RE.sub(lambda m: f"log{m.group(2).translate(_SUB_TRANS)}({m.group(1)})", out)
+
+
+def _fmt_sym_core(expr):
     try:
         expr = sympify(expr)
         if expr.free_symbols or expr.is_Float or expr.has(oo, -oo, zoo, nan):

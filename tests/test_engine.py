@@ -730,3 +730,10 @@ def test_zz_timing_summary(capsys):
         for name, s in TIMINGS:
             print(f"    {name:48s} {s:6.2f} s")
     assert TIMINGS
+
+
+def test_fmt_sym_log_quotient_as_log_base():
+    import sympy as sp
+    assert fv.fmt_sym(sp.log(3) / sp.log(2)) == "log₂(3)"
+    assert fv.fmt_sym(sp.Rational(1, 2) + sp.log(3) / sp.log(2)) == "1/2+log₂(3)"
+    assert fv.fmt_sym(sp.log(5)) == "ln(5)"
