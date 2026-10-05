@@ -42,12 +42,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 # ── Импортируем движок и редактор ────────────────────────────
-# Добавляем путь к _MEIPASS чтобы PyInstaller находил модули-данные
-if getattr(sys, 'frozen', False):
-    _base = sys._MEIPASS
-    if _base not in sys.path:
-        sys.path.insert(0, _base)
-
+# (в exe они лежат как обычные модули PyInstaller — см. generate_spec.py)
 import function_visualizer as fv
 from math_editor import MathEditor, MathModel, IncompleteExpression
 
@@ -86,6 +81,43 @@ UI_FONT = "Segoe UI"
 def _resource_path(name):
     base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, name)
+
+
+def _log_dir():
+    """Папка для error.log: %LOCALAPPDATA%/FuncVisualizer (Windows) или ~/.funcvisualizer."""
+    base = os.environ.get("LOCALAPPDATA") if sys.platform == "win32" else None
+    if base:
+        d = os.path.join(base, "FuncVisualizer")
+    else:
+        d = os.path.join(os.path.expanduser("~"), ".funcvisualizer")
+    try:
+        os.makedirs(d, exist_ok=True)
+        return d
+    except Exception:
+        import tempfile
+        return tempfile.gettempdir()
+
+
+ERROR_LOG = os.path.join(_log_dir(), "error.log")
+
+
+def log_exception(context=""):
+    """
+    Пишет текущий traceback в error.log (в exe без консоли stderr нет, и
+    print_exc() пропал бы) и дублирует в stderr, если он есть.
+    """
+    text = traceback.format_exc()
+    try:
+        import datetime
+        with open(ERROR_LOG, "a", encoding="utf-8") as f:
+            f.write(f"\n[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] {context}\n{text}")
+    except Exception:
+        pass
+    try:
+        if sys.stderr is not None:
+            sys.stderr.write(text)
+    except Exception:
+        pass
 
 
 # ═════════════════════════════════════════════════════════════
@@ -632,6 +664,9 @@ class App(tk.Tk):
         встроенный бинд уже срабатывает сам — не дублируем.
         (Действует на обычные числовые поля; поле формулы клавиатуры не имеет.)
         """
+        if sys.platform != "win32":
+            return      # коды клавиш ниже — Windows virtual-key codes; на X11/macOS
+                        # стандартные бинды Tk работают и так
         KEYCODE_TO_ACTION = {
             67: ("<<Copy>>",  ("c", "C")),
             88: ("<<Cut>>",   ("x", "X")),
@@ -1079,8 +1114,9 @@ class App(tk.Tk):
             try:
                 result = fv.plot_function(self.fig)
             except Exception:
-                traceback.print_exc()
-                self._set_status("Plot error — see console; previous graph restored", ERR_COLOR)
+                log_exception("plot_function")
+                self._set_status(f"Plot error — previous graph restored (details: {ERROR_LOG})",
+                                 ERR_COLOR)
                 self._restore_last_good()
                 return
             self._last_good = settings
@@ -1114,7 +1150,7 @@ class App(tk.Tk):
             fv.plot_function(self.fig)
             self.canvas.draw_idle()
         except Exception:
-            traceback.print_exc()
+            log_exception("restore_last_good")
 
     # ── фоновый поток для sympy ──────────────────────────────
     def _start_worker_thread(self):
@@ -1150,7 +1186,7 @@ class App(tk.Tk):
             try:
                 fv.run_jobs(jobs)
             except Exception:
-                traceback.print_exc()
+                log_exception("symbolic worker")
             finally:
                 with self._jobs_lock:
                     self._running_keys.difference_update(keys)

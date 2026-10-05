@@ -8,10 +8,10 @@ import sys
 base = os.path.dirname(os.path.abspath(__file__))
 
 # Файлы данных: (источник, папка назначения внутри exe)
-datas = [
-    (os.path.join(base, "function_visualizer.py"), "."),
-    (os.path.join(base, "math_editor.py"), "."),
-]
+# Модули function_visualizer / math_editor попадают в exe как обычные
+# скомпилированные модули (hiddenimports + pathex), копировать исходники
+# в datas не нужно.
+datas = []
 # Необязательные ресурсы: добавляем только если файл есть рядом
 for optional in ("ariadna-logo1-trnsp.png", "icon.ico"):
     if os.path.exists(os.path.join(base, optional)):
@@ -54,11 +54,13 @@ a = Analysis(
         'PIL',
         'PIL.Image',
         'PIL.ImageTk',
+        'PIL._tkinter_finder',   # импортируется из C-кода PIL/_imagingtk — анализ его не видит
     ],
     hookspath=[],
     hooksconfig={{}},
     runtime_hooks=[],
-    excludes=['tests', 'pytest', 'IPython', 'jupyter', 'tkinter.test'],
+    excludes=['tests', 'pytest', 'py', '_pytest', 'pluggy', 'iniconfig', 'mpmath.tests',
+              'IPython', 'jupyter', 'tkinter.test'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

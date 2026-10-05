@@ -2,6 +2,8 @@
 
 set PROJ=%~dp0
 set PYTHON=%PROJ%.venv\Scripts\python.exe
+rem Работаем из папки проекта независимо от того, откуда запущен скрипт
+cd /d "%PROJ%"
 
 echo.
 echo === FuncVisualizer Builder ===
