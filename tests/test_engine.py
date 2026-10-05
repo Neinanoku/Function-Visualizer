@@ -836,9 +836,9 @@ def test_plot_margins_and_axis_labels():
     assert xs.min() >= ax.get_xlim()[0] - 1e-9 and xs.max() <= ax.get_xlim()[1] + 1e-9
 
 
-def test_edge_ticks_drawn_when_they_fit():
-    """Деления и линии сетки у краёв: рисуются, если подпись помещается в области
-    построения (раньше отбрасывалось всё ближе одного шага к краю)."""
+def test_edge_ticks_quarter_step_rule():
+    """Линии сетки и деления у краёв: рисуются, если отстоят от края не меньше чем
+    на четверть шага; ближе - ни линии, ни подписи (одно правило для обоих)."""
     fig = Figure(figsize=(8, 6), dpi=100)
     FigureCanvasAgg(fig)
     fv.EXTEND_TO_CANVAS = False
@@ -847,16 +847,19 @@ def test_edge_ticks_drawn_when_they_fit():
                    X_GRID=1, Y_GRID=1)
         ax = res['ax']
         xg = sorted(ax.xaxis.get_majorticklocs()); yg = sorted(ax.yaxis.get_majorticklocs())
-        assert -6 in xg and 5 in xg and 5 in yg and -4 in yg            # сетка до самого края
-        texts = {t.get_text().replace('$', '').replace('\\u2212', '-').replace('−', '-') for t in ax.texts}
-        assert {'-6', '5', '-4'} <= texts, texts                           # подписи 5, −6, −4, 5 есть
-        # Подпись, которая не помещается (деление в 1 px от правого края), не рисуется
-        res = draw(["x^2"], fig=fig, X_LIM_L=-5.0, X_LIM_R=5.01, Y_LIM_B=-5, Y_LIM_T=5, X_GRID=1, Y_GRID=1)
+        assert -6 in xg and 5 in xg and 5 in yg and -4 in yg
+        texts = {t.get_text().replace('$', '').replace('−', '-') for t in ax.texts}
+        assert {'-6', '5', '-4'} <= texts, texts
+        # Ближе четверти шага к краю: ни линии сетки, ни подписи
+        res = draw(["x^2"], fig=fig, X_LIM_L=-5.0, X_LIM_R=5.2, Y_LIM_B=-5, Y_LIM_T=5, X_GRID=1, Y_GRID=1)
         ax = res['ax']
-        x_labels = [t for t in ax.texts if t.get_text().replace('$', '') == '5'
-                    and abs(t.xy[0] - 5) < 1e-9 and abs(t.xy[1]) < 1e-9]
-        assert x_labels == []
-        assert 5 in ax.xaxis.get_majorticklocs()                           # а линия сетки есть
+        xg = sorted(ax.xaxis.get_majorticklocs()); yg = sorted(ax.yaxis.get_majorticklocs())
+        assert 5 not in xg and -5 not in xg and 5 not in yg and -5 not in yg
+        assert not [t for t in ax.texts if t.get_text().replace('$', '') == '5']
+        # Ровно четверть шага и больше - рисуется
+        res = draw(["x^2"], fig=fig, X_LIM_L=-5.0, X_LIM_R=5.3, Y_LIM_B=-5.25, Y_LIM_T=5, X_GRID=1, Y_GRID=1)
+        ax = res['ax']
+        assert 5 in ax.xaxis.get_majorticklocs() and -5 in ax.yaxis.get_majorticklocs()
     finally:
         fv.EXTEND_TO_CANVAS = True
 

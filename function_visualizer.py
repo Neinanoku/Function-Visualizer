@@ -3023,11 +3023,16 @@ def _plot_function_impl(fig=None):
             return []
         return [round(k * step, 10) for k in range(k_lo, k_hi + 1)]
 
+    # Общее правило для линий сетки и делений: рисуем всё, что отстоит от края
+    # окна не меньше чем на четверть шага; ближе - ни линии, ни подписи
+    # (чтобы не было линии без цифры и цифры, срезанной краем).
+    EDGE_FRACTION = 0.25
+
     def make_ticks_for_grid(lim_lo, lim_hi, step):
-        return _multiples_in(lim_lo, lim_hi, step)
+        pad = step * EDGE_FRACTION
+        return _multiples_in(lim_lo + pad - 1e-9, lim_hi - pad + 1e-9, step)
 
     if GRID:
-        # Все линии сетки в пределах окна, включая ближайшие к краям
         x_grid_vals = make_ticks_for_grid(X_LIM_L, X_LIM_R, X_GRID)
         y_grid_vals = make_ticks_for_grid(Y_LIM_B, Y_LIM_T, Y_GRID)
         ax.xaxis.set_major_locator(ticker.FixedLocator(x_grid_vals))
@@ -3062,54 +3067,23 @@ def _plot_function_impl(fig=None):
 
     # ── Деления на осях ─────────────────────────
     def make_ticks(lim_lo, lim_hi, step):
-        # деления — все кратные шага в пределах окна, кроме нуля; подпись у
-        # края остаётся, только если её текст целиком помещается в области
-        # построения (проверка по пикселям ниже)
-        return [v for v in _multiples_in(lim_lo, lim_hi, step) if abs(v) > 1e-9]
-
-    # Проверка «подпись помещается»: меряем реальный текст рендерером и
-    # сравниваем с прямоугольником области построения (запас _EDGE_PAD px).
-    # Меряем только подписи ближе _EDGE_CHECK_PX к краю — остальные помещаются.
-    _EDGE_PAD = 2.0
-    _EDGE_CHECK_PX = 80.0
-    try:
-        _rend = fig.canvas.get_renderer()
-        _ax_bb = ax.get_window_extent(_rend)
-    except Exception:
-        _rend, _ax_bb = None, None
-    _sx = _ax_w_px / max(1e-12, X_LIM_R - X_LIM_L)
-    _sy = _ax_h_px / max(1e-12, Y_LIM_T - Y_LIM_B)
-
-    def _label_fits(artist, axis):
-        if _rend is None or _ax_bb is None:
-            return True
-        try:
-            bb = artist.get_window_extent(_rend)
-        except Exception:
-            return True
-        if axis == 'x':
-            return bb.x0 >= _ax_bb.x0 + _EDGE_PAD and bb.x1 <= _ax_bb.x1 - _EDGE_PAD
-        return bb.y0 >= _ax_bb.y0 + _EDGE_PAD and bb.y1 <= _ax_bb.y1 - _EDGE_PAD
+        # деления - те же значения, что и линии сетки (не ближе четверти шага
+        # к краю), кроме нуля
+        return [v for v in make_ticks_for_grid(lim_lo, lim_hi, step) if abs(v) > 1e-9]
 
     for v in make_ticks(X_LIM_L, X_LIM_R, X_GRID):
         if not X_HIDE:
             ax.plot(v, x_axis_y, '|', color=LABEL_COLOR, markersize=4, markeredgewidth=0.8, zorder=5)
-            lab = ax.annotate(tick_label(v), xy=(v, x_axis_y),
-                              xytext=(0, -6), textcoords='offset points',
-                              ha='center', va='top', fontsize=TICK_FS, color=LABEL_COLOR)
-            near_edge = min(v - X_LIM_L, X_LIM_R - v) * _sx < _EDGE_CHECK_PX
-            if near_edge and not _label_fits(lab, 'x'):
-                lab.remove()
+            ax.annotate(tick_label(v), xy=(v, x_axis_y),
+                        xytext=(0, -6), textcoords='offset points',
+                        ha='center', va='top', fontsize=TICK_FS, color=LABEL_COLOR)
 
     for v in make_ticks(Y_LIM_B, Y_LIM_T, Y_GRID):
         if not Y_HIDE:
             ax.plot(y_axis_x, v, '_', color=LABEL_COLOR, markersize=4, markeredgewidth=0.8, zorder=5)
-            lab = ax.annotate(tick_label(v), xy=(y_axis_x, v),
-                              xytext=(-6, 0), textcoords='offset points',
-                              ha='right', va='center', fontsize=TICK_FS, color=LABEL_COLOR)
-            near_edge = min(v - Y_LIM_B, Y_LIM_T - v) * _sy < _EDGE_CHECK_PX
-            if near_edge and not _label_fits(lab, 'y'):
-                lab.remove()
+            ax.annotate(tick_label(v), xy=(y_axis_x, v),
+                        xytext=(-6, 0), textcoords='offset points',
+                        ha='right', va='center', fontsize=TICK_FS, color=LABEL_COLOR)
 
     # ── Вспомогательные функции подписи ──────────
     TEX = bool(MATHTEXT_LABELS)
