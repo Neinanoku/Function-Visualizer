@@ -836,6 +836,31 @@ def test_plot_margins_and_axis_labels():
     assert xs.min() >= ax.get_xlim()[0] - 1e-9 and xs.max() <= ax.get_xlim()[1] + 1e-9
 
 
+def test_edge_ticks_drawn_when_they_fit():
+    """Деления и линии сетки у краёв: рисуются, если подпись помещается в области
+    построения (раньше отбрасывалось всё ближе одного шага к краю)."""
+    fig = Figure(figsize=(8, 6), dpi=100)
+    FigureCanvasAgg(fig)
+    fv.EXTEND_TO_CANVAS = False
+    try:
+        res = draw(["x^2"], fig=fig, X_LIM_L=-6.967, X_LIM_R=5.843, Y_LIM_B=-4.34, Y_LIM_T=5.66,
+                   X_GRID=1, Y_GRID=1)
+        ax = res['ax']
+        xg = sorted(ax.xaxis.get_majorticklocs()); yg = sorted(ax.yaxis.get_majorticklocs())
+        assert -6 in xg and 5 in xg and 5 in yg and -4 in yg            # сетка до самого края
+        texts = {t.get_text().replace('$', '').replace('\\u2212', '-').replace('−', '-') for t in ax.texts}
+        assert {'-6', '5', '-4'} <= texts, texts                           # подписи 5, −6, −4, 5 есть
+        # Подпись, которая не помещается (деление в 1 px от правого края), не рисуется
+        res = draw(["x^2"], fig=fig, X_LIM_L=-5.0, X_LIM_R=5.01, Y_LIM_B=-5, Y_LIM_T=5, X_GRID=1, Y_GRID=1)
+        ax = res['ax']
+        x_labels = [t for t in ax.texts if t.get_text().replace('$', '') == '5'
+                    and abs(t.xy[0] - 5) < 1e-9 and abs(t.xy[1]) < 1e-9]
+        assert x_labels == []
+        assert 5 in ax.xaxis.get_majorticklocs()                           # а линия сетки есть
+    finally:
+        fv.EXTEND_TO_CANVAS = True
+
+
 def test_grid_far_from_origin():
     """Сетка и деления строятся на любом расстоянии от начала координат (баг: пропадали дальше ±12)."""
     for (xl, xr, yb, yt) in ((100, 110, 200, 210), (-18, -8, 6.5, 16.5), (1e6, 1e6 + 10, -5, 5)):
