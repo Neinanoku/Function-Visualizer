@@ -298,6 +298,21 @@ def run_jobs(jobs):
         _SYM_TLS.force_compute = prev
 
 
+def mark_jobs_failed(keys, exc=None):
+    """
+    Помечает ещё не вычисленные ключи как неудачные (сторож GUI по времени):
+    дальнейшие sym_cached() по ним сразу бросают исключение → численный
+    fallback, и задания больше не ставятся в очередь. Уже готовые результаты
+    не трогаем; если зависший поток всё же досчитает — значение перекроет метку.
+    """
+    if exc is None:
+        exc = TimeoutError("symbolic analysis timed out")
+    with _SYM_LOCK:
+        for k in keys:
+            _SYM_CACHE.setdefault(k, (False, exc))
+            _PENDING.pop(k, None)
+
+
 def clear_symbolic_cache():
     with _SYM_LOCK:
         _SYM_CACHE.clear()
@@ -1444,6 +1459,10 @@ def exact_y_of(expr, x_sym, cx):
             return None
         if fmt_sym(e) is not None:
             return e
+        # simplify громоздких выражений (корни Кардано и т.п.) может длиться
+        # минуты, а «простым» результат всё равно не станет — не пытаемся.
+        if count_ops(e) > 40:
+            return None
         s = sym_cached(('simp', str(e)), lambda: simplify(e))
         if s.free_symbols or s.has(oo, -oo, zoo, nan):
             return None

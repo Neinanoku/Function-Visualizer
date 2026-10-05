@@ -18,8 +18,11 @@
 import sys
 import os
 import json
+import math
+import time
 import queue
 import threading
+import collections
 import traceback
 import tkinter as tk
 from tkinter import messagebox, filedialog, colorchooser
@@ -65,6 +68,8 @@ FUNC_COLORS = fv.CURVE_COLORS  # берём из движка
 
 LEFT_PANEL_WIDTH = 500
 REDRAW_DELAY_MS  = 250
+SYMBOLIC_TIMEOUT_S = 20.0     # сторож: пачка символьных заданий дольше этого — считается зависшей
+MAX_GRID_LINES   = 2000       # span / step не больше этого (иначе сетка «съедает» рисунок)
 
 UI_FONT = "Segoe UI"
 
@@ -413,13 +418,23 @@ class FuncRow:
         }
 
     def from_dict(self, d):
-        try:
-            self.editor.set_model(MathModel.from_json(d.get("model", {})))
-        except Exception:
+        # Приоритет: дерево формулы ("model"); если его нет/оно пустое, а есть
+        # текст — разбираем текст (проект, написанный руками или другой программой).
+        model = None
+        m = d.get("model")
+        if isinstance(m, dict) and m.get("root"):
             try:
-                self.editor.set_model(MathModel.from_text(d.get("text", "")))
+                model = MathModel.from_json(m)
+                if model.is_empty():
+                    model = None
             except Exception:
-                self.editor.set_model(MathModel())
+                model = None
+        if model is None and d.get("text"):
+            try:
+                model = MathModel.from_text(str(d["text"]))
+            except Exception:
+                model = None
+        self.editor.set_model(model if model is not None else MathModel())
         self.set_color(d.get("color", self.color))
         self.set_linewidth(d.get("width", 1.8))
         if d.get("style") in self.LINESTYLES:
@@ -559,12 +574,23 @@ class App(tk.Tk):
         self._redraw_job = None
         self._drawing = False
         self._redraw_wanted = False
-        self._worker = None
-        self._worker_queue = queue.Queue()
         self._loading = False
         self._pan = None
         self._tl_job = None
         self._incomplete_rows = 0
+        self._last_good = None            # последние настройки, которые построились без ошибок
+
+        # Фоновая символика: ОДИН рабочий поток, пачки заданий (новые — первыми),
+        # множество ключей «в работе» (чтобы не считать одно и то же дважды) и
+        # сторож по времени (см. _poll_worker).
+        self._worker_queue = queue.Queue()
+        self._jobs_lock = threading.Lock()
+        self._job_batches = collections.deque(maxlen=3)
+        self._jobs_event = threading.Event()
+        self._running_keys = set()
+        self._batch_seq = 0
+        self._active_batch = None         # (seq, keys, started_at)
+        self._worker = None
 
         # Иконка окна и панели задач
         try:
@@ -579,9 +605,10 @@ class App(tk.Tk):
         self._add_func()
         self._setup_clipboard_shortcuts()
         self._connect_graph_events()
+        self._start_worker_thread()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.after(200, self._poll_worker)
+        self._poll_job = self.after(200, self._poll_worker)
         self.schedule_redraw()
 
     # ── Ctrl+C/X/V/A независимо от раскладки клавиатуры ─────
@@ -985,9 +1012,9 @@ class App(tk.Tk):
         if xl >= xr or yb >= yt:
             raise ValueError("View window: left < right and bottom < top required")
         xg = num(self.xgrid_e, "Step X"); yg = num(self.ygrid_e, "Step Y")
-        if xg <= 0 or yg <= 0:
-            raise ValueError("Grid step must be positive")
-        if (xr - xl) / xg > 2000 or (yt - yb) / yg > 2000:
+        if not (math.isfinite(xg) and math.isfinite(yg)) or xg <= 0 or yg <= 0:
+            raise ValueError("Grid step must be a positive finite number")
+        if (xr - xl) / xg > MAX_GRID_LINES or (yt - yb) / yg > MAX_GRID_LINES:
             raise ValueError("Grid step is too small for this view window")
 
         fills = []
@@ -1025,8 +1052,9 @@ class App(tk.Tk):
 
     def _redraw(self):
         self._redraw_job = None
-        if self._drawing:
-            # уже рисуем (например, из вложенного события) — повторим позже
+        if self._drawing or self._pan is not None:
+            # уже рисуем (вложенное событие) или пользователь тянет график —
+            # перерисуем, когда это закончится
             self._redraw_wanted = True
             return
         self._drawing = True
@@ -1042,9 +1070,11 @@ class App(tk.Tk):
             try:
                 result = fv.plot_function(self.fig)
             except Exception:
-                self._set_status("Plot error — see console", ERR_COLOR)
                 traceback.print_exc()
+                self._set_status("Plot error — see console; previous graph restored", ERR_COLOR)
+                self._restore_last_good()
                 return
+            self._last_good = settings
 
             errors = result.get('errors', {}) or {}
             for idx, r in enumerate(self.func_rows):
@@ -1053,7 +1083,7 @@ class App(tk.Tk):
             self.canvas.draw_idle()
 
             if result.get('pending'):
-                self._start_worker(fv.take_pending_jobs())
+                self._submit_jobs(fv.take_pending_jobs())
                 self._set_status("Refining labels (symbolic analysis)…")
             elif errors or self._incomplete_rows:
                 self._set_status("Some functions are incomplete or invalid — hover the red field",
@@ -1062,28 +1092,67 @@ class App(tk.Tk):
                 self._set_status("Ready")
         finally:
             self._drawing = False
-            if self._redraw_wanted:
+            if self._redraw_wanted and self._pan is None:
                 self._redraw_wanted = False
                 self.schedule_redraw()
 
-    # ── фоновый поток для sympy ──────────────────────────────
-    def _start_worker(self, jobs):
-        if not jobs:
+    def _restore_last_good(self):
+        """После сбоя построения возвращаем на холст последний удачный график."""
+        if not self._last_good:
             return
-        # Каждая пачка — свой daemon-поток: если sympy «завис» на одной
-        # функции, остальные пачки всё равно посчитаются.
-        def run():
+        try:
+            self._apply_to_engine(self._last_good)
+            fv.plot_function(self.fig)
+            self.canvas.draw_idle()
+        except Exception:
+            traceback.print_exc()
+
+    # ── фоновый поток для sympy ──────────────────────────────
+    def _start_worker_thread(self):
+        t = threading.Thread(target=self._worker_loop, name="symbolic-worker", daemon=True)
+        self._worker = t
+        t.start()
+
+    def _submit_jobs(self, jobs):
+        """Ставит пачку отложенных заданий движка в очередь (новые — первыми)."""
+        with self._jobs_lock:
+            jobs = [(k, fn) for k, fn in jobs if k not in self._running_keys]
+            if not jobs:
+                return False
+            self._batch_seq += 1
+            self._job_batches.append((self._batch_seq, jobs))
+            self._jobs_event.set()
+        return True
+
+    def _worker_loop(self):
+        me = threading.current_thread()
+        while True:
+            self._jobs_event.wait()
+            if self._worker is not me:          # нас заменил сторож — выходим
+                return
+            with self._jobs_lock:
+                if not self._job_batches:
+                    self._jobs_event.clear()
+                    continue
+                seq, jobs = self._job_batches.pop()   # самая свежая пачка — первой
+                keys = [k for k, _ in jobs]
+                self._running_keys.update(keys)
+                self._active_batch = (seq, keys, time.time())
             try:
                 fv.run_jobs(jobs)
             except Exception:
                 traceback.print_exc()
             finally:
-                self._worker_queue.put("done")
-        t = threading.Thread(target=run, daemon=True)
-        t.start()
-        self._worker = t
+                with self._jobs_lock:
+                    self._running_keys.difference_update(keys)
+                    if self._active_batch is not None and self._active_batch[0] == seq:
+                        self._active_batch = None
+                self._worker_queue.put(("done", seq))
+            if self._worker is not me:
+                return
 
     def _poll_worker(self):
+        """Главный поток: результаты рабочего потока + сторож по времени."""
         got = False
         try:
             while True:
@@ -1093,7 +1162,27 @@ class App(tk.Tk):
             pass
         if got:
             self.schedule_redraw()
-        self.after(150, self._poll_worker)
+
+        # Сторож: sympy иногда «уходит в себя» на минуты (simplify громоздких
+        # радикалов и т.п.). Тогда помечаем невычисленные ключи пачки как
+        # неудачные (движок оставит численные подписи и не поставит их снова),
+        # запускаем новый рабочий поток, а зависший оставляем доживать daemon'ом.
+        with self._jobs_lock:
+            ab = self._active_batch
+        if ab is not None and time.time() - ab[2] > SYMBOLIC_TIMEOUT_S:
+            seq, keys, _ = ab
+            try:
+                fv.mark_jobs_failed(keys, TimeoutError("symbolic analysis timed out"))
+            except Exception:
+                pass
+            with self._jobs_lock:
+                self._running_keys.difference_update(keys)
+                self._active_batch = None
+            self._start_worker_thread()
+            self._set_status("Symbolic analysis timed out — some labels stay numeric", ERR_COLOR)
+            self.schedule_redraw()
+
+        self._poll_job = self.after(150, self._poll_worker)
 
     def _on_canvas_resize(self, _event):
         # Пересчитать поля фигуры под новый размер (с задержкой)
@@ -1148,7 +1237,9 @@ class App(tk.Tk):
 
     def _set_limits(self, xl, xr, yb, yt):
         def fmt(v):
-            s = f"{v:.4g}"
+            # 10 значащих цифр: обратное чтение из поля не теряет точность
+            # при зуме/панорамировании вдали от начала координат
+            s = f"{v:.10g}"
             return s
         self._loading = True      # одна перерисовка вместо четырёх
         try:
@@ -1161,8 +1252,12 @@ class App(tk.Tk):
     def _on_graph_scroll(self, event):
         if event.inaxes is None or event.xdata is None:
             return
-        if self._graph_hit_any(event):
-            return            # колесо над подписью — поворот (движок)
+        try:
+            m = fv._active_free_text_manager
+            if m is not None and m._find_hit(event) is not None:
+                return        # колесо над свободной подписью — поворот (движок)
+        except Exception:
+            pass
         lims = self._current_limits()
         if lims is None:
             return
@@ -1175,6 +1270,16 @@ class App(tk.Tk):
         nxr = cx + (xr - cx) * factor
         nyb = cy - (cy - yb) * factor
         nyt = cy + (yt - cy) * factor
+        # Не отдаляем дальше, чем позволяет шаг сетки (иначе _collect откажет,
+        # а поля «уедут» от реального окна)
+        try:
+            xg = fv.parse_number(self.xgrid_e.get()); yg = fv.parse_number(self.ygrid_e.get())
+            if (nxr - nxl) / xg > MAX_GRID_LINES or (nyt - nyb) / yg > MAX_GRID_LINES:
+                self._set_status("Zoom-out limit for the current grid step — increase Step X / Step Y",
+                                 ERR_COLOR)
+                return
+        except Exception:
+            pass
         self._set_limits(nxl, nxr, nyb, nyt)
 
     def _on_graph_press(self, event):
@@ -1212,6 +1317,9 @@ class App(tk.Tk):
         p = self._pan
         self._pan = None
         if p is None or not p["moved"]:
+            if self._redraw_wanted:
+                self._redraw_wanted = False
+                self.schedule_redraw()
             return
         cur = p.get("cur")
         if cur is None:
@@ -1326,10 +1434,19 @@ class App(tk.Tk):
             for t in data.get("free_texts", []):
                 if isinstance(t, dict) and "text" in t:
                     fv.FREE_TEXTS.append(dict(t))
-            al = data.get("axis_labels", {})
+            al = data.get("axis_labels", {}) or {}
             for key in ("x", "y"):
-                if key in al and isinstance(al[key], dict):
-                    fv.AXIS_LABELS[key].update(al[key])
+                st = fv.AXIS_LABELS[key]
+                st.update({'dx': 0.0, 'dy': 0.0, 'color': None, 'fontsize': None})
+                src = al.get(key)
+                if isinstance(src, dict):
+                    try:
+                        st['dx'] = float(src.get('dx', 0.0) or 0.0)
+                        st['dy'] = float(src.get('dy', 0.0) or 0.0)
+                    except Exception:
+                        pass
+                    if src.get('color'):
+                        st['color'] = str(src['color'])
             fv.reset_annotation_offsets()
             for item in data.get("annotation_offsets", []):
                 try:
@@ -1343,11 +1460,12 @@ class App(tk.Tk):
         self.schedule_redraw()
 
     def _on_close(self):
-        try:
-            if self._redraw_job is not None:
-                self.after_cancel(self._redraw_job)
-        except Exception:
-            pass
+        for job in (self._redraw_job, getattr(self, "_poll_job", None), self._tl_job):
+            try:
+                if job is not None:
+                    self.after_cancel(job)
+            except Exception:
+                pass
         self.destroy()
 
 
