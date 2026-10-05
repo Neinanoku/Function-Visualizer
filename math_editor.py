@@ -1092,8 +1092,7 @@ class _Parser:
 #  ВИД: РАСКЛАДКА (BOXES)
 # ═════════════════════════════════════════════════════════════
 
-PREFERRED_FONTS = ["Century Schoolbook", "Century", "TeX Gyre Schola", "Times New Roman",
-                   "Cambria", "Liberation Serif", "DejaVu Serif"]
+PREFERRED_FONTS = ["Times New Roman", "Liberation Serif", "Cambria", "DejaVu Serif"]
 
 # Пропорции (в долях размера шрифта px), откалиброваны по Liberation Serif /
 # Times New Roman: ось дроби ≈ центр знака «−», x-height ≈ 0.47 em,
@@ -1643,11 +1642,8 @@ class MathEditor(tk.Frame):
 
     def _layout_node(self, node, px, depth, prev_box, prev_item):
         if isinstance(node, Atom):
-            # Переменные и константы (e, π) — курсивом, как в учебниках. Для π это
-            # ещё и защита от путаницы: прямая греческая π во многих шрифтах
-            # (Century Schoolbook, Times) совпадает по рисунку с кириллической «п»,
-            # а в курсиве они различаются.
-            italic = node.kind in ('var', 'const')
+            # Переменные и e — курсивом, π — прямая (в Times New Roman она читается однозначно)
+            italic = node.kind == 'var' or (node.kind == 'const' and node.text == 'e')
             return _TextBox(self, node.text, px, italic)
         if isinstance(node, Frac):
             fpx = _scaled(px, _FRAC_SCALE)

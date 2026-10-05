@@ -76,12 +76,11 @@ ZOOM_DELAY_MS    = 120        # после колеса мыши (предпро
 SYMBOLIC_TIMEOUT_S = 20.0     # сторож: пачка символьных заданий дольше этого — считается зависшей
 MAX_GRID_LINES   = 2000       # span / step не больше этого (иначе сетка «съедает» рисунок)
 
-# Шрифт интерфейса (панель, клавиатура, подсказки): Century Schoolbook;
+# Шрифт интерфейса (панель, клавиатура, подсказки): Times New Roman;
 # если его нет на машине — ближайшие замены. Имя уточняется при старте
 # (_resolve_ui_font), когда Tk уже может перечислить установленные семейства.
-UI_FONT = "Century Schoolbook"
-UI_FONT_FALLBACKS = ["Century Schoolbook", "Century", "TeX Gyre Schola",
-                     "Times New Roman", "Cambria", "Liberation Serif", "DejaVu Serif"]
+UI_FONT = "Times New Roman"
+UI_FONT_FALLBACKS = ["Times New Roman", "Liberation Serif", "Cambria", "DejaVu Serif"]
 
 
 def _resolve_ui_font(root):
@@ -308,8 +307,6 @@ class Keypad(tk.Frame):
                 fnt = (UI_FONT, 10, "bold") if is_digit else (UI_FONT, 10)
                 if len(label) > 4:            # arcsin, arccos… — чуть мельче, чтобы не слипались
                     fnt = (UI_FONT, 9)
-                if label in ("π", "e"):       # константы курсивом (прямая π похожа на «п»)
-                    fnt = (UI_FONT, 11, "italic")
                 if token == "__page__":
                     label = "fn ▸" if self._page == 0 else "◂ back"
                     tip = "more functions: arcsin, arccos, sinh…" if self._page == 0 else "back to sin, cos, ln…"

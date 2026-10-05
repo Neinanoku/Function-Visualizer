@@ -777,5 +777,5 @@ def test_font_presets_apply():
         assert fv.GRAPH_FONT == name
         assert plt.rcParams['mathtext.fontset'] in ("stix", "cm", "dejavuserif", "dejavusans", "custom")
     fv.apply_font_preset("nonsense")
-    assert fv.GRAPH_FONT == "century"          # неизвестное имя → пресет по умолчанию
-    fv.apply_font_preset("century")
+    assert fv.GRAPH_FONT == "times"            # неизвестное имя → пресет по умолчанию
+    fv.apply_font_preset("times")
