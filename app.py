@@ -2463,11 +2463,17 @@ class LanguageChooser(tk.Tk):
         tk.Frame(box, bg=BORDER, height=1).pack(fill="x", pady=_px(10))
         self._buttons = {}
         for code, name, key in LANGUAGES:
-            b = tk.Button(box, text=he_display(name), font=_lang_font(code, 12, bold=True),
+            # Одинаковый размер кнопок в пикселях: у трёх шрифтов (Schola, David,
+            # Century Schoolbook) разная высота строки, и без фиксированной
+            # «обёртки» кнопки получались бы разной высоты.
+            holder = tk.Frame(box, bg=CARD_BG, width=_px(CHOOSER_LOGO_WIDTH), height=_px(44))
+            holder.pack(fill="x", pady=_px(3))
+            holder.pack_propagate(False)
+            b = tk.Button(holder, text=he_display(name), font=_lang_font(code, 12, bold=True),
                           bg=BTN_BLUE, fg="white", activebackground=ACCENT, activeforeground="white",
-                          relief="flat", bd=0, cursor="hand2", width=14, pady=_px(6),
+                          relief="flat", bd=0, cursor="hand2", pady=0,
                           command=lambda c=code: self._pick(c))
-            b.pack(fill="x", pady=_px(3))
+            b.pack(fill="both", expand=True)
             self._buttons[code] = b
             self.bind(key, lambda _e, c=code: self._pick(c))
             self.bind(f"<KP_{key}>", lambda _e, c=code: self._pick(c))
