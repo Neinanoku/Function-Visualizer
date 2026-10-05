@@ -48,72 +48,72 @@ def _build_spec(entry, name):
     )
 
     spec_content = f"""# -*- mode: python ; coding: utf-8 -*-
-    import sys
-    block_cipher = None
+import sys
+block_cipher = None
 
-    a = Analysis(
-        [{repr(os.path.join(base, entry))}],
-        pathex=[{repr(base)}],
-        binaries=[],
-        datas=[
-            {datas_str}
-        ],
-        hiddenimports=[
-            'function_visualizer',
-            'math_editor',
-            'matplotlib',
-            'matplotlib.backends.backend_tkagg',
-            'matplotlib.backends.backend_agg',
-            'matplotlib.backends.backend_svg',
-            'matplotlib.backends.backend_pdf',
-            'matplotlib.backends.backend_ps',
-            'matplotlib.backends._backend_tk',
-            'sympy',
-            'scipy',
-            'scipy.signal',
-            'scipy.optimize',
-            'scipy.special',
-            'numpy',
-            'PIL',
-            'PIL.Image',
-            'PIL.ImageTk',
-            'PIL._tkinter_finder',   # импортируется из C-кода PIL/_imagingtk — анализ его не видит
-        ],
-        hookspath=[],
-        hooksconfig={{}},
-        runtime_hooks=[],
-        excludes=['tests', 'pytest', 'py', '_pytest', 'pluggy', 'iniconfig', 'mpmath.tests',
-                  'IPython', 'jupyter', 'tkinter.test'],
-        win_no_prefer_redirects=False,
-        win_private_assemblies=False,
-        cipher=block_cipher,
-        noarchive=False,
-    )
+a = Analysis(
+    [{repr(os.path.join(base, entry))}],
+    pathex=[{repr(base)}],
+    binaries=[],
+    datas=[
+        {datas_str}
+    ],
+    hiddenimports=[
+        'function_visualizer',
+        'math_editor',
+        'matplotlib',
+        'matplotlib.backends.backend_tkagg',
+        'matplotlib.backends.backend_agg',
+        'matplotlib.backends.backend_svg',
+        'matplotlib.backends.backend_pdf',
+        'matplotlib.backends.backend_ps',
+        'matplotlib.backends._backend_tk',
+        'sympy',
+        'scipy',
+        'scipy.signal',
+        'scipy.optimize',
+        'scipy.special',
+        'numpy',
+        'PIL',
+        'PIL.Image',
+        'PIL.ImageTk',
+        'PIL._tkinter_finder',   # импортируется из C-кода PIL/_imagingtk — анализ его не видит
+    ],
+    hookspath=[],
+    hooksconfig={{}},
+    runtime_hooks=[],
+    excludes=['tests', 'pytest', 'py', '_pytest', 'pluggy', 'iniconfig', 'mpmath.tests',
+              'IPython', 'jupyter', 'tkinter.test'],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
 
-    pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-    exe = EXE(
-        pyz,
-        a.scripts,
-        a.binaries,
-        a.zipfiles,
-        a.datas,
-        [],
-        name={repr(name)},
-        debug=False,
-        bootloader_ignore_signals=False,
-        strip=False,
-        upx=False,
-        upx_exclude=[],
-        runtime_tmpdir=None,
-        icon={repr(os.path.join(base, 'icon.ico')) if os.path.exists(os.path.join(base, 'icon.ico')) else None},
-        console=False,
-        disable_windowed_traceback=False,
-        target_arch=None,
-        codesign_identity=None,
-        entitlements_file=None,
-    )
-    """
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    [],
+    name={repr(name)},
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    icon={repr(os.path.join(base, 'icon.ico')) if os.path.exists(os.path.join(base, 'icon.ico')) else None},
+    console=False,
+    disable_windowed_traceback=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+"""
 
     spec_path = os.path.join(base, name + ".spec")
     with open(spec_path, "w", encoding="utf-8") as f:
