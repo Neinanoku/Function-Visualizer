@@ -447,7 +447,18 @@ class MathModel:
             return
         if isinstance(node, Frac) and row is node.num:
             self.cursor = (node.den, min(i, len(node.den.items)))
-        elif isinstance(node, (Sup, Sub)) or (isinstance(node, Root) and row is node.index):
+        elif isinstance(node, Root) and row is node.index:
+            # из показателя корня — в подкоренное выражение
+            self.cursor = (node.body, 0)
+        elif isinstance(node, Sub):
+            # из основания логарифма — в его аргумент (скобки справа), если есть
+            prow = node.parent
+            k = prow.index(node) if prow is not None else -1
+            if prow is not None and k + 1 < len(prow.items) and isinstance(prow.items[k + 1], Paren):
+                self.cursor = (prow.items[k + 1].body, 0)
+            else:
+                self._exit_after(node)
+        elif isinstance(node, Sup):
             self._exit_after(node)
 
     def move_up(self):
@@ -1240,7 +1251,13 @@ class _FracBox(_Box):
         gap = max(1, int(round(px * 0.12)))
         pad = max(2, int(round(px * 0.13)))
         self.num, self.den, self.axis, self.pad = num, den, axis, pad
-        self.num_up = axis + 1 + gap + num.desc          # базовая линия числителя (вверх)
+        # Спуск числителя берём не меньше реального спуска шрифта (у курсивного
+        # «y» и скобок хвосты достают до него) + 1 px, чтобы не касаться черты.
+        try:
+            real_desc = ed.fonts.real_desc(px, italic=True)
+        except Exception:
+            real_desc = num.desc
+        self.num_up = axis + 1 + gap + max(num.desc, real_desc) + 1   # базовая линия числителя (вверх)
         self.den_up = axis - 1 - gap - den.asc           # базовая линия знаменателя (вверх, < 0)
         super().__init__(max(num.w, den.w) + 2 * pad,
                          self.num_up + num.asc,

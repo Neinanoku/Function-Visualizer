@@ -203,8 +203,15 @@ def test_up_down():
     m.move_down()
     assert m.cursor == (m.root, 2)
     m = typed('root', '3')
+    m.move_down()                                # из показателя корня — в подкоренное
+    assert m.cursor == (m.root.items[0].body, 0)
+    m = typed('logb', '2')
+    m.move_down()                                # из основания логарифма — в аргумент
+    assert m.cursor == (m.root.items[2].body, 0)
+    m = typed('logb', '2')
+    m.root.remove_at(2)                          # без скобок справа — просто выходим
     m.move_down()
-    assert m.cursor == (m.root, 1)
+    assert m.cursor == (m.root, 2)
     MathModel().move_up(); MathModel().move_down()   # пустая модель не падает
 
 

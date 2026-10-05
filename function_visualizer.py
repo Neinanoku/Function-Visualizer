@@ -2427,6 +2427,10 @@ def _short_error(exc):
         return msg if msg else "Unknown name"
     if isinstance(exc, TypeError):
         return "Invalid expression"
+    if isinstance(exc, ZeroDivisionError):
+        return "Division by zero"
+    if isinstance(exc, KeyError) and any(k in str(exc) for k in ('ComplexInfinity', 'zoo', 'NaN', 'nan')):
+        return "Undefined value (division by zero or log base 1?)"
     if isinstance(exc, ValueError):
         msg = str(exc).strip().splitlines()[0] if str(exc).strip() else ''
         return (msg or "Invalid value")[:80]

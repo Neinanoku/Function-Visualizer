@@ -564,6 +564,7 @@ class App(tk.Tk):
         self._loading = False
         self._pan = None
         self._tl_job = None
+        self._incomplete_rows = 0
 
         # Иконка окна и панели задач
         try:
@@ -953,6 +954,7 @@ class App(tk.Tk):
         бросает ValueError с сообщением для строки состояния.
         """
         funcs, colors, widths, styles, domains = [], [], [], [], []
+        self._incomplete_rows = 0
         for r in self.func_rows:
             if r.is_empty():
                 r.editor.set_error(None)
@@ -963,6 +965,7 @@ class App(tk.Tk):
                     r.editor.set_error(None)
                 except IncompleteExpression as ex:
                     r.editor.set_error(str(ex))
+                    self._incomplete_rows += 1
                     funcs.append("")
             colors.append(r.get_color())
             widths.append(r.get_linewidth())
@@ -1052,8 +1055,9 @@ class App(tk.Tk):
             if result.get('pending'):
                 self._start_worker(fv.take_pending_jobs())
                 self._set_status("Refining labels (symbolic analysis)…")
-            elif errors:
-                self._set_status("Some functions have errors — hover the red field", ERR_COLOR)
+            elif errors or self._incomplete_rows:
+                self._set_status("Some functions are incomplete or invalid — hover the red field",
+                                 ERR_COLOR)
             else:
                 self._set_status("Ready")
         finally:
