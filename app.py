@@ -157,12 +157,13 @@ UI_FONT_FALLBACKS = ["TeX Gyre Schola", "TeXGyreSchola", "Century Schoolbook",
 
 
 def _resolve_ui_font(root):
-    global UI_FONT, HE_FONT
+    global UI_FONT, HE_FONT, RU_FONT
     try:
         import tkinter.font as tkfont
         fams = set(tkfont.families(root))
         UI_FONT = next((f for f in UI_FONT_FALLBACKS if f in fams), UI_FONT_FALLBACKS[-1])
         HE_FONT = next((f for f in HE_FONT_FALLBACKS if f in fams), HE_FONT_FALLBACKS[-1])
+        RU_FONT = next((f for f in RU_FONT_FALLBACKS if f in fams), RU_FONT_FALLBACKS[-1])
     except Exception:
         pass
     return UI_FONT
@@ -173,7 +174,10 @@ def _resolve_ui_font(root):
 # ═════════════════════════════════════════════════════════════
 # LANG = "en" — английский интерфейс (панель слева, график справа);
 # LANG = "he" — иврит (app_he.py): панель справа, график слева, ивритский
-# текст шрифтом David (HE_FONT), цифры и латиница — прежним UI_FONT.
+# текст шрифтом David (HE_FONT), цифры и латиница — прежним UI_FONT;
+# LANG = "ru" — русский (app_ru.py): раскладка как в английском, русский
+# текст шрифтом Century Schoolbook (RU_FONT; в TeX Gyre Schola кириллицы
+# нет), цифры, латиница и формулы — прежним UI_FONT.
 # Визуальный порядок символов считается по правилам bidi (fv.bidi_visual):
 # двоеточия, тире, многоточия, пробелы и скобки встают на «ивритские» места
 # («:X צעד», «…שמור תמונה», «— f1 / f2»). Смешанные подписи разбиваются на
@@ -186,6 +190,12 @@ LANG = "en"
 HE_FONT = "David"
 HE_FONT_FALLBACKS = ["David", "David CLM", "Frank Ruehl CLM", "Noto Serif Hebrew",
                      "FreeSerif", "DejaVu Sans"]
+RU_FONT = "Century Schoolbook"
+RU_FONT_FALLBACKS = ["Century Schoolbook", "Times New Roman", "Cambria", "Georgia",
+                     "Liberation Serif", "DejaVu Serif"]
+_CYR_RE = re.compile(r'[\u0400-\u04FF]')
+# Русские слова с пробелами между ними — один фрагмент шрифта RU_FONT
+_CYR_WORDS_RE = re.compile(r'[\u0400-\u04FF]+(?: +[\u0400-\u04FF]+)*')
 _HEB_RUN_RE = re.compile(r'[\u0590-\u05FF][\u0590-\u05FF\s]*[\u0590-\u05FF]|[\u0590-\u05FF]')
 
 
@@ -195,6 +205,24 @@ def RTL():
 
 def has_heb(text):
     return bool(text) and _HEB_RUN_RE.search(str(text)) is not None
+
+
+def has_cyr(text):
+    return bool(text) and _CYR_RE.search(str(text)) is not None
+
+
+def local_font():
+    """Шрифт «местного» письма текущего языка: David (иврит), Century Schoolbook (русский)."""
+    return HE_FONT if LANG == "he" else RU_FONT
+
+
+def has_local(text):
+    """Есть ли в строке буквы «местного» письма текущего языка."""
+    if LANG == "he":
+        return has_heb(text)
+    if LANG == "ru":
+        return has_cyr(text)
+    return False
 
 
 STRINGS_HE = {
@@ -307,20 +335,147 @@ _ERR_PATTERNS_HE = [
     (re.compile(r"^cannot parse the constant in (.+)$"), lambda m: f"לא ניתן לפענח את הקבוע ב-{m.group(1)}"),
 ]
 
+STRINGS_RU = {
+    # окно / карточки
+    "Function Visualizer — Ariadna": "Визуализатор функций — Ariadna",
+    "Functions": "Функции", "+ Add function": "+ Добавить функцию",
+    "View Window": "Окно просмотра", "X:  from / to": "X:  от / до", "Y:  from / to": "Y:  от / до",
+    "Tip: mouse wheel over the graph zooms, drag pans.":
+        "Подсказка: колесо мыши над графиком — масштаб, перетаскивание — сдвиг.",
+    "Grid": "Сетка", "Show grid": "Показывать сетку", "  Step X:": "  Шаг X:", "Step Y:": "Шаг Y:",
+    "Display on Graph": "Показывать на графике",
+    "Asymptotes": "Асимптоты", "Holes": "Выколотые точки", "Extrema": "Экстремумы",
+    "X-intercepts": "Пересечения с осью X", "Y-intercepts": "Пересечения с осью Y",
+    "Intersections": "Пересечения функций",
+    "Show values": "Показывать значения", "Hide X labels": "Скрыть подписи X", "Hide Y labels": "Скрыть подписи Y",
+    "Label size:": "Размер подписей:",
+    "Area Fill": "Заливка области", "+ Add fill": "+ Добавить заливку",
+    "f1 / f2 — function indices (0, 1, …) or 'x' for the X axis":
+        "f1 / f2 — номера функций (0, 1, …) или 'x' для оси X",
+    "Graph Labels": "Подписи на графике",
+    "Double-click empty space on the graph to add a label. Drag to move, scroll to rotate, "
+    "right-click for options. Point labels can be dragged too.":
+        "Двойной щелчок по пустому месту графика добавляет подпись. Перетаскивание — перемещение, "
+        "колесо — поворот, правая кнопка — меню. Подписи точек тоже можно перетаскивать.",
+    "Clear all labels": "Удалить все подписи", "Reset point labels": "Сбросить подписи точек",
+    "  Save image…": "  Сохранить картинку…", "Reset view": "Сбросить вид",
+    "Save project": "Сохранить проект", "Open project": "Открыть проект",
+    # строки функции / заливки
+    "w:": "толщ.:", "domain:": "ОДЗ:", "Solid": "Сплошная", "Dashed": "Штриховая", "Dotted": "Пунктир",
+    "Pick color for f{idx}": "Цвет для f{idx}",
+    "from:": "от:", "to:": "до:", "style:": "стиль:", "borders": "границы", "density:": "плотность:",
+    "45deg ////": "45° ////", "135deg \\\\": "135° \\\\", "Dots ....": "Точки ....",
+    # диалоги
+    "Cannot delete": "Нельзя удалить", "At least one function is required.": "Нужна хотя бы одна функция.",
+    "Remove all {n} label(s) added on the graph?": "Удалить все добавленные подписи ({n})?",
+    "Save graph image": "Сохранить картинку графика", "PNG image": "Картинка PNG", "SVG vector": "Вектор SVG",
+    "All files": "Все файлы", "Save error": "Ошибка сохранения", "Saved: {path}": "Сохранено: {path}",
+    "Function Visualizer project": "Проект Function Visualizer",
+    "Project saved: {path}": "Проект сохранён: {path}", "Open error": "Ошибка открытия",
+    "Cannot open project:\n{err}": "Не удалось открыть проект:\n{err}",
+    "Project loaded: {path}": "Проект загружен: {path}",
+    # статус
+    "Ready": "Готово", "Refining labels (symbolic analysis)…": "Уточняю подписи (символьный анализ)…",
+    "Some functions are incomplete or invalid — hover the red field":
+        "Некоторые функции не дописаны или ошибочны — наведите мышь на красное поле",
+    "Symbolic analysis timed out — some labels stay numeric":
+        "Символьный анализ не уложился в отведённое время — часть подписей останется числовой",
+    "Plot error — previous graph restored (details: {log})":
+        "Ошибка построения — восстановлен предыдущий график (подробности: {log})",
+    "Zoom-out limit for the current grid step — increase Step X / Step Y":
+        "Предел отдаления для текущего шага сетки — увеличьте шаг X / Y",
+    "visible x": "видно x", "visible y": "видно y",
+    # проверка настроек
+    "{what}: cannot read '{val}'": "{what}: не удаётся прочитать '{val}'",
+    "X from": "X от", "X to": "X до", "Y from": "Y от", "Y to": "Y до", "Step X": "Шаг X", "Step Y": "Шаг Y",
+    "View window must be finite": "Окно просмотра должно быть конечным",
+    "View window: left < right and bottom < top required":
+        "Окно просмотра: нужно левая < правая и нижняя < верхняя",
+    "Grid step must be a positive finite number": "Шаг сетки должен быть положительным конечным числом",
+    "Grid step is too small for this view window": "Шаг сетки слишком мал для этого окна просмотра",
+    "Fill #{n}: check parameters": "Заливка №{n}: проверьте параметры",
+    # подсказки клавиатуры
+    "variable x": "переменная x", "variable y (for equations, e.g. x²+y²=9)": "переменная y (для уравнений, напр. x²+y²=9)",
+    "square": "квадрат", "power": "степень", "open parenthesis": "открыть скобку",
+    "leave the parentheses": "выйти из скобок", "square root": "квадратный корень", "n-th root": "корень n-й степени",
+    "absolute value": "модуль", "the number π": "число π", "the number e": "число e", "fraction": "дробь",
+    "sine": "синус", "cosine": "косинус", "tangent": "тангенс", "cotangent": "котангенс",
+    "natural logarithm": "натуральный логарифм", "common (base-10) logarithm": "десятичный логарифм",
+    "logarithm with base a": "логарифм по основанию a", "exponential": "экспонента",
+    "more functions: arcsin, arccos, sinh…": "ещё функции: arcsin, arccos, sinh…",
+    "back to sin, cos, ln…": "назад к sin, cos, ln…",
+    "cursor up (numerator)": "курсор вверх (числитель)", "cursor down (denominator)": "курсор вниз (знаменатель)",
+    "inverse sine": "арксинус", "inverse cosine": "арккосинус", "inverse tangent": "арктангенс",
+    "secant": "секанс", "cosecant": "косеканс", "hyperbolic sine": "гиперболический синус",
+    "hyperbolic cosine": "гиперболический косинус", "hyperbolic tangent": "гиперболический тангенс",
+    "multiply": "умножить", "minus": "минус", "decimal point": "десятичная точка",
+    "equals (equation / x = c)": "равно (уравнение / x = c)", "plus": "плюс",
+    "cursor left": "курсор влево", "cursor right": "курсор вправо", "delete": "удалить", "clear the field": "очистить поле",
+}
+
+ENGINE_STRINGS_RU = {
+    "New label": "Новая подпись", "Edit label": "Изменить подпись", "Label text:": "Текст подписи:",
+    "Label color": "Цвет подписи", "Edit text": "Изменить текст", "Text color...": "Цвет текста...",
+    "Text size": "Размер текста", "Reset rotation": "Сбросить поворот", "Delete": "Удалить",
+    "Add label here": "Добавить подпись здесь", '"{key}" label color...': 'Цвет подписи "{key}"...',
+    "Label size": "Размер подписи", "Reset position": "Сбросить положение",
+}
+
+ERRORS_RU = {
+    "Syntax error": "Синтаксическая ошибка", "Invalid expression": "Некорректное выражение",
+    "Division by zero": "Деление на ноль",
+    "Undefined value (division by zero or log base 1?)":
+        "Неопределённое значение (деление на ноль или логарифм по основанию 1?)",
+    "equation is an identity — every point satisfies it": "уравнение — тождество: ему удовлетворяет каждая точка",
+    "equation has no solutions (contradiction)": "у уравнения нет решений (противоречие)",
+    "empty expression": "пустое выражение", "exponent without base": "показатель степени без основания",
+    "subscript is only allowed as a log base": "нижний индекс допустим только как основание логарифма",
+}
+_ERR_PARTS_RU = {
+    "exponent": "показатель степени", "denominator": "знаменатель", "numerator": "числитель",
+    "expression": "выражение", "log base": "основание логарифма", "parentheses": "скобки",
+    "root index": "показатель корня", "root": "корень", "absolute value": "модуль",
+}
+_ERR_EMPTY_RU = {
+    "exponent": "пустой показатель степени", "denominator": "пустой знаменатель",
+    "numerator": "пустой числитель", "expression": "пустое выражение",
+    "log base": "пустое основание логарифма", "parentheses": "пустые скобки",
+    "root index": "пустой показатель корня", "root": "пустой корень", "absolute value": "пустой модуль",
+}
+_ERR_PATTERNS_RU = [
+    (re.compile(r"^empty (.+)$"), lambda m: _ERR_EMPTY_RU.get(m.group(1), f"пусто: {m.group(1)}")),
+    (re.compile(r"^trailing operator in (.+)$"),
+     lambda m: f"{_ERR_PARTS_RU.get(m.group(1), m.group(1))}: оператор в конце"),
+    (re.compile(r"^lone '\.' in (.+)$"),
+     lambda m: f"{_ERR_PARTS_RU.get(m.group(1), m.group(1))}: одинокая точка '.'"),
+    (re.compile(r"^(.+) without argument$"), lambda m: f"{m.group(1)} без аргумента"),
+    (re.compile(r"^bad number '(.+)'$"), lambda m: f"неверное число '{m.group(1)}'"),
+    (re.compile(r"^operator '(.+)' without left operand$"), lambda m: f"оператор '{m.group(1)}' без левого операнда"),
+    (re.compile(r"^unknown name: (.+)$"), lambda m: f"неизвестное имя: {m.group(1)}"),
+    (re.compile(r"^cannot parse the constant in (.+)$"),
+     lambda m: f"не удаётся разобрать константу: {_ERR_PARTS_RU.get(m.group(1), m.group(1))}"),
+]
+
+# Таблицы по языкам
+_STRINGS = {"he": STRINGS_HE, "ru": STRINGS_RU}
+_ENGINE_STRINGS = {"he": ENGINE_STRINGS_HE, "ru": ENGINE_STRINGS_RU}
+_ERRORS = {"he": (ERRORS_HE, _ERR_PATTERNS_HE), "ru": (ERRORS_RU, _ERR_PATTERNS_RU)}
+
 
 def T(text, **fmt):
     """Строка интерфейса на текущем языке (ключ — английская строка)."""
-    out = STRINGS_HE.get(text, text) if LANG == "he" else text
+    out = _STRINGS.get(LANG, {}).get(text, text)
     return out.format(**fmt) if fmt else out
 
 
 def tr_err(msg):
     """Перевод сообщения об ошибке формулы; неизвестное — как есть."""
-    if LANG != "he" or not msg:
+    if LANG not in _ERRORS or not msg:
         return msg
-    if msg in ERRORS_HE:
-        return ERRORS_HE[msg]
-    for rx, fn in _ERR_PATTERNS_HE:
+    table, patterns = _ERRORS[LANG]
+    if msg in table:
+        return table[msg]
+    for rx, fn in patterns:
         m = rx.match(msg)
         if m:
             return fn(m)
@@ -376,7 +531,7 @@ def _widget_text(run, is_heb):
 
 def ui_font(text, size, bold=False, italic=False):
     """Кортеж шрифта Tk: David для строк с ивритом, иначе UI_FONT."""
-    fam = HE_FONT if (LANG == "he" and has_heb(text)) else UI_FONT
+    fam = local_font() if has_local(text) else UI_FONT
     style = " ".join(w for w, on in (("bold", bold), ("italic", italic)) if on)
     return (fam, size, style) if style else (fam, size)
 
@@ -409,6 +564,25 @@ def make_label(parent, text, size=9, color=SUBTEXT, bold=False, bg=None, **kw):
             # по краям берут направление абзаца; без RTL-символов GDI ничего не
             # переставляет, так что строка одинакова для Windows и Linux.
             text = fv.bidi_visual(text, 'R')
+        if LANG == "ru" and has_cyr(text):
+            # Русский: слова — RU_FONT, цифры/латиница/знаки — UI_FONT, слева направо
+            box = tk.Frame(parent, bg=bg)
+            pos = 0
+            runs = []
+            for m in _CYR_WORDS_RE.finditer(text):
+                if m.start() > pos:
+                    runs.append((text[pos:m.start()], False))
+                runs.append((m.group(0), True))
+                pos = m.end()
+            if pos < len(text):
+                runs.append((text[pos:], False))
+            for run, is_cyr in runs:
+                if not is_cyr and not run.strip():
+                    run = run.replace(" ", "\u00a0")
+                fam = RU_FONT if is_cyr else UI_FONT
+                tk.Label(box, text=run, bg=bg, fg=color, font=(fam, size, "bold") if bold else (fam, size),
+                         padx=0, bd=0).pack(side="left")
+            return box
         return tk.Label(parent, text=text, bg=bg, fg=color, font=ui_font(text, size, bold), **kw)
     box = tk.Frame(parent, bg=bg)
     for run, is_heb in _visual_runs(text):          # уже слева направо
@@ -449,19 +623,20 @@ def make_paragraph(parent, text, size=8, color=SUBTEXT, bg=None, width_px=300):
 
 
 def make_check(parent, text, var, bg=None):
-    """Чекбокс с подписью; в иврите — индикатор справа, подпись (фрагментами) слева."""
+    """Чекбокс с подписью. Иврит/русский: индикатор + подпись из фрагментов
+    (make_label); в иврите индикатор справа, подпись слева, в русском — наоборот."""
     bg = bg or parent.cget("bg")
     text = T(text)
-    if not (RTL() and has_heb(text)):
+    if not has_local(text):
         return tk.Checkbutton(parent, text=text, variable=var, bg=bg, fg=TEXT,
                               selectcolor=ENTRY_BG, activebackground=bg, activeforeground=TEXT,
                               font=ui_font(text, 10), bd=0, highlightthickness=0)
     box = tk.Frame(parent, bg=bg)
     cb = tk.Checkbutton(box, text="", variable=var, bg=bg, fg=TEXT, selectcolor=ENTRY_BG,
                         activebackground=bg, activeforeground=TEXT, bd=0, highlightthickness=0, padx=0)
-    cb.pack(side="right")
+    cb.pack(side=side())
     lbl = make_label(box, text, size=10, color=TEXT, bg=bg)
-    lbl.pack(side="right")
+    lbl.pack(side=side(), padx=(0 if RTL() else 2, 2 if RTL() else 0))
 
     def toggle(_e=None):
         var.set(0 if var.get() else 1)
@@ -478,6 +653,11 @@ def apply_engine_language():
         fv.EXTRA_FONT_FAMILIES = [HE_FONT, "DejaVu Sans"]
         fv.BIDI_SIMPLE = True
         fv.UI_DISPLAY = he_display
+    elif LANG == "ru":
+        fv.UI_TRANSLATIONS = dict(ENGINE_STRINGS_RU)
+        fv.EXTRA_FONT_FAMILIES = [RU_FONT, "DejaVu Sans"]
+        fv.BIDI_SIMPLE = False
+        fv.UI_DISPLAY = None
     else:
         fv.UI_TRANSLATIONS = {}
         fv.EXTRA_FONT_FAMILIES = []
@@ -586,7 +766,7 @@ def small_button(parent, text, command, bg=BTN_DEL, fg="white", **kw):
     opts = dict(bg=bg, fg=fg, relief="flat", font=ui_font(text, 9, bold=True),
                 cursor="hand2", bd=0, padx=10, pady=4, activebackground=bg,
                 activeforeground=fg, command=command)
-    if "font" in kw and has_heb(text) and LANG == "he":
+    if "font" in kw and has_local(text):
         f = kw.pop("font")
         kw["font"] = ui_font(text, f[1], bold="bold" in f[2:])
     opts.update(kw)
@@ -772,7 +952,7 @@ class FuncRow:
         # Поле формулы — 2-D редактор без клавиатуры (ввод с экранной клавиатуры)
         self.editor = MathEditor(self.frame, font_size=_px(15), on_change=lambda _e: on_change(),
                                  on_focus=lambda e: on_focus(self), width=_px(260), height=_px(40),
-                                 error_font=(HE_FONT, 10) if RTL() else None)
+                                 error_font=(local_font(), 10) if LANG != "en" else None)
         self.editor.pack(side=S, padx=2, fill="x", expand=True)
 
         # Кнопка удалить
@@ -1355,8 +1535,8 @@ class App(tk.Tk):
         def lim_row(label, defaults):
             r = tk.Frame(g, bg=CARD_BG)
             r.pack(fill="x", pady=2)
-            if RTL():
-                make_label(r, label, size=9, bg=CARD_BG).pack(side="right", padx=(0, 8))
+            if LANG != "en":
+                make_label(r, label, size=9, bg=CARD_BG).pack(side=side(), padx=(0, 8))
             else:
                 tk.Label(r, text=label, bg=CARD_BG, fg=SUBTEXT,
                          font=(UI_FONT, 9), width=12, anchor="e").pack(side="left")
@@ -1416,9 +1596,21 @@ class App(tk.Tk):
         ]
         grid_f = tk.Frame(dg, bg=CARD_BG)
         grid_f.pack(fill="x")
+        # Три колонки; если самая длинная переведённая подпись не влезает
+        # (русские названия длиннее английских) — две колонки.
+        cols = 3
+        if LANG != "en":
+            try:
+                import tkinter.font as tkfont
+                f = tkfont.Font(family=local_font(), size=10)
+                widest = max(f.measure(T(t)) for t, _ in checks) + _px(44)   # + индикатор и отступы
+                if widest * 3 > _px(LEFT_PANEL_WIDTH - 60):
+                    cols = 2
+            except Exception:
+                pass
         for i, (txt, var) in enumerate(checks):
-            col = (2 - i % 3) if RTL() else (i % 3)      # в иврите колонки справа налево
-            make_check(grid_f, txt, var).grid(row=i // 3, column=col, sticky=anchor_start(),
+            col = (cols - 1 - i % cols) if RTL() else (i % cols)   # в иврите колонки справа налево
+            make_check(grid_f, txt, var).grid(row=i // cols, column=col, sticky=anchor_start(),
                                               padx=6, pady=1)
         if RTL():
             grid_f.pack_configure(anchor="e")
@@ -1498,12 +1690,12 @@ class App(tk.Tk):
         self._shrink_canvas_request()
         self._preview = FramePreview(self.canvas)
 
-        # Строка состояния. В иврите текст собирается из фрагментов
-        # (иврит — David, цифры — UI_FONT) в status_box; self.status (Label)
-        # хранит полный текст (его читают тесты) и в RTL не показывается.
+        # Строка состояния. В иврите и русском текст собирается из фрагментов
+        # (местный шрифт + UI_FONT для цифр) в status_box; self.status (Label)
+        # хранит полный текст (его читают тесты) и тогда не показывается.
         self.status = tk.Label(parent, text="", bg=APP_BG, fg=SUBTEXT,
                                font=(UI_FONT, 9), anchor="w")
-        if RTL():
+        if LANG != "en":
             self.status_box = tk.Frame(parent, bg=APP_BG)
             self.status_box.pack(fill="x", padx=12, pady=(0, 8))
         else:
@@ -1524,7 +1716,7 @@ class App(tk.Tk):
         if self.status_box is not None:
             for w in self.status_box.winfo_children():
                 w.destroy()
-            make_label(self.status_box, text, size=9, color=color, bg=APP_BG).pack(side="right")
+            make_label(self.status_box, text, size=9, color=color, bg=APP_BG).pack(side=side())
 
     # ══════════════════════════════════════════════════════════
     #  Клавиатура → активный редактор

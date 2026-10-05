@@ -23,14 +23,15 @@ def fake_project(tmp_path, monkeypatch):
     (tmp_path / "fonts").mkdir()
     (tmp_path / "fonts" / "texgyreschola-regular.otf").write_bytes(b"\0")
     (tmp_path / "fonts" / "LICENSE-TeX-Gyre-Schola.txt").write_text("x")
-    for entry in ("app.py", "app_he.py"):
+    for entry in ("app.py", "app_he.py", "app_ru.py"):
         (tmp_path / entry).write_text("pass\n")
     monkeypatch.setattr(generate_spec, "base", str(tmp_path))
     return tmp_path
 
 
 @pytest.mark.parametrize("entry,name", [("app.py", "FuncVisualizer"),
-                                        ("app_he.py", "FuncVisualizer_he")])
+                                        ("app_he.py", "FuncVisualizer_he"),
+                                        ("app_ru.py", "FuncVisualizer_ru")])
 def test_spec_compiles(fake_project, entry, name):
     path = generate_spec.write_spec(entry, name)
     assert os.path.basename(path) == name + ".spec"
