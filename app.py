@@ -136,6 +136,56 @@ ERR_COLOR = "#d9363e"
 
 FUNC_COLORS = fv.CURVE_COLORS  # берём из движка
 
+# ── Темы ─────────────────────────────────────────────────────
+# Палитра интерфейса (константы выше — светлая тема) и тема графика движка.
+# Тема применяется до создания окна (apply_theme), поэтому смена темы
+# пересоздаёт главное окно с сохранением состояния (см. main()).
+THEME = "light"
+UI_THEMES = {
+    "light": dict(APP_BG="#f4f6f9", PANEL_BG="#e8ecf2", CARD_BG="#ffffff", TEXT="#1a1a2e",
+                  SUBTEXT="#6b7280", ENTRY_BG="#ffffff", BORDER="#d1d5db", BTN_DEL="#84878c",
+                  KEY_BG="#ffffff", KEY_BG2="#eef1f5", KEY_FG="#1a1a2e", plot="light"),
+    "dark":  dict(APP_BG="#15161a", PANEL_BG="#1f2127", CARD_BG="#23252c", TEXT="#e8e8ec",
+                  SUBTEXT="#9a9ca6", ENTRY_BG="#2b2e36", BORDER="#3a3d46", BTN_DEL="#5c6066",
+                  KEY_BG="#2b2e36", KEY_BG2="#343842", KEY_FG="#e8e8ec", plot="dark"),
+    "print": dict(APP_BG="#f4f6f9", PANEL_BG="#e8ecf2", CARD_BG="#ffffff", TEXT="#1a1a2e",
+                  SUBTEXT="#6b7280", ENTRY_BG="#ffffff", BORDER="#d1d5db", BTN_DEL="#84878c",
+                  KEY_BG="#ffffff", KEY_BG2="#eef1f5", KEY_FG="#1a1a2e", plot="print"),
+}
+THEME_NAMES = [("light", "Light"), ("dark", "Dark"), ("print", "Print")]
+SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".funcvisualizer.json")
+
+
+def apply_theme(name):
+    """Переключает палитру модуля и тему графика движка (до создания окон)."""
+    global THEME, APP_BG, PANEL_BG, CARD_BG, TEXT, SUBTEXT, ENTRY_BG, BORDER, BTN_DEL
+    global KEY_BG, KEY_BG2, KEY_FG
+    th = UI_THEMES.get(name) or UI_THEMES["light"]
+    THEME = name if name in UI_THEMES else "light"
+    APP_BG, PANEL_BG, CARD_BG, TEXT = th["APP_BG"], th["PANEL_BG"], th["CARD_BG"], th["TEXT"]
+    SUBTEXT, ENTRY_BG, BORDER, BTN_DEL = th["SUBTEXT"], th["ENTRY_BG"], th["BORDER"], th["BTN_DEL"]
+    KEY_BG, KEY_BG2, KEY_FG = th["KEY_BG"], th["KEY_BG2"], th["KEY_FG"]
+    fv.PLOT_THEME = th["plot"]
+
+
+def load_settings():
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_settings(**values):
+    d = load_settings()
+    d.update(values)
+    try:
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=1)
+    except Exception:
+        pass
+
 LEFT_PANEL_WIDTH = 500        # при 96 dpi; реальные пиксели — через _px()
 UI_SCALE = 1.0                # коэффициент DPI (1.5 при масштабе 150 %), задаётся в App.__init__
 
@@ -257,7 +307,8 @@ STRINGS_HE = {
         "ריחוף מעל עקומה מציג נקודה; לחיצה מקבעת אותה, גרירה מזיזה לאורך העקומה, "
         "לחיצה ימנית מוחקת.",
     "  Save image…": "שמור תמונה…", "Reset view": "איפוס תצוגה",
-    "↶ Undo": "↶ בטל", "↷ Redo": "↷ בצע שוב",
+    "↶ Undo": "↶ בטל", "↷ Redo": "↷ חזור",
+    "Theme": "ערכת נושא", "Theme:": "ערכת נושא:", "Light": "בהיר", "Dark": "כהה", "Print": "הדפסה",
     "Save project": "שמור פרויקט", "Open project": "פתח פרויקט",
     # строки функции / заливки
     "w:": "עובי:", "domain:": "תחום:", "Solid": "רציף", "Dashed": "מקווקו", "Dotted": "נקודות",
@@ -380,7 +431,8 @@ STRINGS_RU = {
         "Наведите на кривую, чтобы увидеть точку; щелчок закрепляет её, перетаскивание двигает "
         "вдоль кривой, правая кнопка удаляет.",
     "  Save image…": "  Сохранить картинку…", "Reset view": "Сбросить вид",
-    "↶ Undo": "↶ Отменить", "↷ Redo": "↷ Повторить",
+    "↶ Undo": "↶ Отмена", "↷ Redo": "↷ Повтор",
+    "Theme": "Тема", "Theme:": "Тема:", "Light": "Светлая", "Dark": "Тёмная", "Print": "Печать",
     "Save project": "Сохранить проект", "Open project": "Открыть проект",
     # строки функции / заливки
     "w:": "толщ.:", "domain:": "ОДЗ:", "Solid": "Сплошная", "Dashed": "Штриховая", "Dotted": "Пунктир",
@@ -1009,7 +1061,10 @@ class FuncRow:
         # Поле формулы — 2-D редактор без клавиатуры (ввод с экранной клавиатуры)
         self.editor = MathEditor(self.frame, font_size=_px(15), on_change=lambda _e: on_change(),
                                  on_focus=lambda e: on_focus(self), width=_px(260), height=_px(40),
-                                 error_font=(local_font(), 10) if LANG != "en" else None)
+                                 error_font=(local_font(), 10) if LANG != "en" else None,
+                                 bg=ENTRY_BG, fg=TEXT, border_color=BORDER,
+                                 placeholder_color=SUBTEXT,
+                                 placeholder_fill=PANEL_BG if THEME == "dark" else "#e4eefb")
         self.editor.pack(side=S, padx=2, fill="x", expand=True)
 
         # Кнопка удалить
@@ -1540,7 +1595,7 @@ class Probe:
                           color=color, linewidth=1.0, linestyle='--', alpha=0.8,
                           zorder=9, animated=animated)[0]
         tangent.set_visible(tan is not None)
-        marker = ax.plot([x], [y], 'o', color=color, markersize=7, markeredgecolor='white',
+        marker = ax.plot([x], [y], 'o', color=color, markersize=7, markeredgecolor=fv.plot_background(),
                          markeredgewidth=1.2, zorder=12, animated=animated)[0]
         text = ax.annotate(self._label(idx, x, y), xy=(x, y), xytext=(10, 10),
                            textcoords='offset points', ha='left', va='bottom',
@@ -1760,7 +1815,7 @@ class FramePreview:
             self.photo = ImageTk.PhotoImage(img)
             if self.label is None:
                 self.label = tk.Label(self.widget, image=self.photo, bd=0,
-                                      highlightthickness=0, bg="white")
+                                      highlightthickness=0, bg=fv.plot_background())
             else:
                 self.label.configure(image=self.photo)
             self.label.place(in_=self.widget, x=int(round(x)), y=int(round(y)))
@@ -1776,7 +1831,7 @@ class FramePreview:
         try:
             from PIL import Image
             x0, y0, x1, y1 = self.box
-            region = Image.new("RGB", (x1 - x0, y1 - y0), "white")
+            region = Image.new("RGB", (x1 - x0, y1 - y0), fv.plot_background())
             region.paste(self.base.crop(self.box), (int(round(dx)), int(round(dy))))
             img = self.base.copy()
             img.paste(region, (x0, y0))
@@ -1808,7 +1863,7 @@ class FramePreview:
             else:
                 w2, h2 = max(1, int(round(W / scale))), max(1, int(round(H / scale)))
                 small = base.resize((w2, h2), Image.BILINEAR)
-                region = Image.new("RGB", (W, H), "white")
+                region = Image.new("RGB", (W, H), fv.plot_background())
                 region.paste(small, (int(round(qx - qx / scale)), int(round(qy - qy / scale))))
             img = self.base.copy()
             img.paste(region, (x0, y0))
@@ -1864,6 +1919,8 @@ class App(tk.Tk):
         self._state_current = None
         self._state_sync = True
         self._state_last_push = 0.0
+        self._restart_theme = None        # смена темы: main() пересоздаёт окно
+        self._restart_state = None
         self._incomplete_rows = 0
         self._preview = None              # FramePreview (создаётся после холста)
         self._last_good = None            # последние настройки, которые построились без ошибок
@@ -1887,7 +1944,7 @@ class App(tk.Tk):
             pass
 
         # Фигура matplotlib, живущая в правой части окна
-        self.fig = Figure(figsize=(7, 7), dpi=100, facecolor="white")
+        self.fig = Figure(figsize=(7, 7), dpi=100, facecolor=fv.plot_background())
 
         self._build_ui()
         self._add_func()
@@ -2198,7 +2255,7 @@ class App(tk.Tk):
         frame.pack(fill="both", expand=True, padx=10, pady=(0, 4))
         self.canvas = FigureCanvasTkAgg(self.fig, master=frame)
         w = self.canvas.get_tk_widget()
-        w.configure(bg="white", highlightthickness=0)
+        w.configure(bg=fv.plot_background(), highlightthickness=0)
         w.pack(fill="both", expand=True)
         # add="+": НЕ затирать собственный обработчик <Configure> бэкенда
         # matplotlib (он подгоняет размер фигуры под виджет) — иначе при
@@ -2218,14 +2275,29 @@ class App(tk.Tk):
         # Строка состояния. В иврите и русском текст собирается из фрагментов
         # (местный шрифт + UI_FONT для цифр) в status_box; self.status (Label)
         # хранит полный текст (его читают тесты) и тогда не показывается.
-        self.status = tk.Label(parent, text="", bg=APP_BG, fg=SUBTEXT,
+        status_row = tk.Frame(parent, bg=APP_BG)
+        status_row.pack(fill="x", padx=12, pady=(0, 6))
+        # Тема (светлая / тёмная / печать) — у дальнего края строки состояния
+        self._theme_names = {he_display(T(name)): code for code, name in THEME_NAMES}
+        cur = next((n for n, c in self._theme_names.items() if c == THEME), list(self._theme_names)[0])
+        self._theme_var = tk.StringVar(value=cur)
+        om = tk.OptionMenu(status_row, self._theme_var, *self._theme_names.keys(),
+                           command=lambda _v: self._switch_theme(self._theme_names.get(self._theme_var.get(), "light")))
+        om.config(bg=ENTRY_BG, fg=TEXT, activebackground=CARD_BG, activeforeground=TEXT,
+                  relief="flat", font=ui_font(T("Light"), 8), bd=0, highlightthickness=1,
+                  highlightbackground=BORDER, width=8)
+        om["menu"].config(bg=ENTRY_BG, fg=TEXT, activebackground=ACCENT, font=ui_font(T("Light"), 9))
+        om.pack(side=oside())
+        make_label(status_row, "Theme:", size=8, bg=APP_BG).pack(side=oside(), padx=(0, 4))
+        Tooltip(om, T("Theme"))
+        self.status = tk.Label(status_row, text="", bg=APP_BG, fg=SUBTEXT,
                                font=(UI_FONT, 9), anchor="w")
         if LANG != "en":
-            self.status_box = tk.Frame(parent, bg=APP_BG)
-            self.status_box.pack(fill="x", padx=12, pady=(0, 8))
+            self.status_box = tk.Frame(status_row, bg=APP_BG)
+            self.status_box.pack(side=side(), fill="x", expand=True)
         else:
             self.status_box = None
-            self.status.pack(fill="x", padx=12, pady=(0, 8))
+            self.status.pack(side=side(), fill="x", expand=True)
 
     # ── утилиты ──────────────────────────────────────────────
     def _pointer_in(self, widget):
@@ -2957,7 +3029,7 @@ class App(tk.Tk):
         if not path:
             return
         try:
-            self.fig.savefig(path, dpi=200, bbox_inches="tight", facecolor="white")
+            self.fig.savefig(path, dpi=200, bbox_inches="tight", facecolor=fv.plot_background())
             self._set_status(T("Saved: {path}", path=path), BTN_ADD)
         except Exception as ex:
             messagebox.showerror(he_display(T("Save error")), str(ex))
@@ -3079,6 +3151,17 @@ class App(tk.Tk):
             self._loading = False
         self.schedule_redraw()
 
+    def _switch_theme(self, code):
+        if code == THEME:
+            return
+        save_settings(theme=code)
+        self._restart_theme = code
+        try:
+            self._restart_state = self._project_dict()
+        except Exception:
+            self._restart_state = None
+        self._on_close()
+
     def _on_close(self):
         for job in (self._redraw_job, getattr(self, "_poll_job", None), self._tl_job):
             try:
@@ -3095,7 +3178,7 @@ class App(tk.Tk):
 #  ВЫБОР ЯЗЫКА ПРИ ЗАПУСКЕ
 # ═════════════════════════════════════════════════════════════
 
-VERSION = "4.0"
+VERSION = "4.1"
 
 # (код, название на самом языке, клавиша)
 LANGUAGES = [("en", "English", "1"), ("he", "עברית", "2"), ("ru", "Русский", "3")]
@@ -3198,13 +3281,28 @@ def main(lang=None):
     lang='en'/'he'/'ru' — сразу на этом языке (app_he.py, app_ru.py).
     """
     global LANG
+    settings = load_settings()
+    apply_theme(settings.get("theme", "light"))
     if lang is None:
         lang = choose_language()
         if lang is None:
             return
     LANG = lang
-    app = App()
-    app.mainloop()
+    state = None
+    while True:
+        app = App()
+        if state is not None:
+            try:
+                app.load_project(state)
+            except Exception:
+                log_exception("restore state after theme switch")
+        app.mainloop()
+        if not app._restart_theme:
+            break
+        # Смена темы: палитра читается при создании виджетов, поэтому окно
+        # пересоздаётся; формулы, настройки и подписи переносятся
+        apply_theme(app._restart_theme)
+        state = app._restart_state
 
 
 if __name__ == "__main__":
