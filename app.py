@@ -1412,7 +1412,19 @@ class FillRow:
         # Число площади (интеграл) рядом со штриховкой
         self.area_var = tk.IntVar(value=1)
         self.area_var.trace_add("write", lambda *_: on_change())
-        make_check(self.frame2, "area value", self.area_var, bg=PANEL_BG).pack(side=S, padx=(10, 4))
+        make_check(self.frame2, "area value", self.area_var, bg=PANEL_BG).pack(side=S, padx=(10, 2))
+        # Текущая площадь — видна всегда, независимо от галочки (латиница/цифры:
+        # обычный Label, слева направо в любом языке)
+        self._area_text = tk.Label(self.frame2, text="", bg=PANEL_BG, fg=SUBTEXT, font=(UI_FONT, 9))
+        self._area_text.pack(side=S, padx=(0, 4))
+
+    def set_area(self, value):
+        """value — (число, точная форма | None) из движка или None."""
+        try:
+            txt = "(" + fv.area_text_plain(value[0], value[1]) + ")" if value else ""
+        except Exception:
+            txt = ""
+        self._area_text.config(text=txt)
 
     def get(self):
         """Returns tuple (f1, f2, x_from, x_to, style, borders, density, show_area, from_str, to_str) or None on error."""
@@ -2827,6 +2839,8 @@ class App(tk.Tk):
                 self.probe.draw_pins(result['ax'])
             except Exception:
                 log_exception("probe.draw_pins")
+            for i, fr in enumerate(self.fill_rows):
+                fr.set_area(fv.LAST_FILL_AREAS.get(i))
 
             errors = result.get('errors', {}) or {}
             for idx, r in enumerate(self.func_rows):
@@ -3552,7 +3566,7 @@ class App(tk.Tk):
 #  ВЫБОР ЯЗЫКА ПРИ ЗАПУСКЕ
 # ═════════════════════════════════════════════════════════════
 
-VERSION = "4.3"
+VERSION = "4.3.1"
 
 # (код, название на самом языке, клавиша)
 LANGUAGES = [("en", "English", "1"), ("he", "עברית", "2"), ("ru", "Русский", "3")]

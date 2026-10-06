@@ -464,6 +464,9 @@ CURVE_HIDDEN = set()
 # Особые точки последнего построения (нули, экстремумы, пересечения, дырки…):
 # {(x, y): {'x', 'y', 'label'}} — для экспорта таблицы значений.
 LAST_POINTS = {}
+# Площади заливок последнего построения: {индекс заливки: (число, точная форма или None)} —
+# считаются всегда, независимо от галочки «показывать площадь» (строка заливки показывает их).
+LAST_FILL_AREAS = {}
 # Приложение может поставить сюда функцию event → bool: «под курсором уже
 # есть свой объект» (щуп) — тогда меню свободных подписей не открывается.
 PRESS_HIT_HOOK = None
@@ -2095,6 +2098,8 @@ READABLE_MAX_RADICAND = 99     # подкоренное число
 
 def exact_is_readable(expr):
     """True, если точную форму стоит показывать вместо десятичной."""
+    if expr is None:
+        return False
     if not READABLE_EXACT:
         return True
     try:
@@ -3049,6 +3054,18 @@ PLOT_THEMES = {
 PLOT_THEME = 'light'
 
 
+def area_text_plain(area, exact):
+    """«S = 2 2/3» или «S ≈ 1.23» обычным текстом (для панели настроек)."""
+    if exact is not None:
+        try:
+            t = fmt_sym(exact)
+            if t:
+                return "S = " + t
+        except Exception:
+            pass
+    return f"S ≈ {area:.4g}"
+
+
 def plot_background():
     return PLOT_THEMES.get(PLOT_THEME, PLOT_THEMES['light'])['bg']
 
@@ -3198,6 +3215,7 @@ def _plot_function_impl(fig=None):
     _DRAW_STATE['pending'] = False
     _disconnect_previous()
     LAST_POINTS.clear()
+    LAST_FILL_AREAS.clear()
     errors = {}
 
     x_span = X_LIM_R - X_LIM_L
@@ -4125,15 +4143,19 @@ def _plot_function_impl(fig=None):
                             fill_color, X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T,
                             density=density, ax_px=(_ax_w_px, _ax_h_px))
 
-            # Число площади (интеграл) в центре видимой части заливки
-            if show_area and math.isfinite(full_from) and math.isfinite(full_to) and full_from < full_to:
+            # Площадь (интеграл): считается всегда — строка заливки показывает её
+            # рядом с галочкой; на графике подпись рисуется только с галочкой
+            if math.isfinite(full_from) and math.isfinite(full_to) and full_from < full_to:
                 f2_func_a = None if (isinstance(f2, str) or f2 is None) else func_data[f2][0]
                 meta1 = curve_meta[f1_idx] if f1_idx < len(curve_meta) else None
                 meta2 = (None if f2_func_a is None else
                          (curve_meta[f2] if f2 < len(curve_meta) else None))
                 area, exact = fill_area(fi, f1_func, f2_func_a, full_from, full_to,
                                         raw_from, raw_to, meta1, meta2)
-                if area is not None and valid.any():
+                if area is not None:
+                    LAST_FILL_AREAS[fi] = (area, exact if exact_is_readable(exact) else None) \
+                        if exact is not None else (area, None)
+                if show_area and area is not None and valid.any():
                     xc = float(np.mean(xf[valid]))
                     yc = float(np.mean((y1_fill[valid] + y2_fill[valid]) / 2.0))
                     annotate_area(fi, xc, yc, area_label_text(area, exact), color1)

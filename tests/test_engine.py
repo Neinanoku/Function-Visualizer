@@ -881,9 +881,13 @@ def test_fill_area_label():
     res = draw(["x^2", "x"], fig=fig, FILL=[(0, 1, 0.0, 1.0, 0, True, 0.02, True, "0", "1")])
     labels = [t.get_text() for t in res['ax'].texts if t.get_text().startswith("S")]
     assert labels and "1/6" in labels[0], labels
-    # галочка снята — подписи нет
+    # галочка снята — подписи нет, но площадь посчитана (для строки заливки)
     res = draw(["x^2"], fig=fig, FILL=[(0, "x", 0.0, 1.0, 0, True, 0.02, False, "0", "1")])
     assert not [t for t in res['ax'].texts if t.get_text().startswith("S")]
+    area, exact = fv.LAST_FILL_AREAS[0]
+    assert area == pytest.approx(1 / 3, abs=1e-4) and str(exact) == "1/3"
+    assert fv.area_text_plain(area, exact) == "S = 1/3"
+    assert fv.area_text_plain(2.3456, None) == "S ≈ 2.346"
 
 
 def test_exact_readability_and_mixed_numbers():
