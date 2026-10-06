@@ -3015,6 +3015,7 @@ def _plot_function_impl(fig=None):
     ASYM_COLOR   = "#555555"
     GRID_COLOR   = "#cccccc"
     LABEL_COLOR  = "#000000"
+    FIG_BG       = "white"
 
     _scale_geom = math.sqrt(abs(x_span * y_span))  # оставляем для совместимости
     _FS       = max(4, min(24, FONT_SIZE))     # зажимаем в разумные пределы
@@ -3027,8 +3028,8 @@ def _plot_function_impl(fig=None):
     else:
         fig.clear()
         ax = fig.add_subplot(111)
-    ax.set_facecolor("white")
-    fig.patch.set_facecolor("white")
+    ax.set_facecolor(FIG_BG)
+    fig.patch.set_facecolor(FIG_BG)
 
     for spine in ax.spines.values():
         spine.set_visible(False)
@@ -3765,12 +3766,107 @@ def _plot_function_impl(fig=None):
                 ax.plot(seg_x, seg_y, color=color,
                         linewidth=lw, zorder=4)
 
-    for fill_entry in FILL:
+    def _exact_bound(v, raw):
+        """Точная граница интеграла: из исходной строки (pi/2) или из «круглого» числа."""
+        ex = parse_exact(raw) if raw else None
+        if ex is not None:
+            return ex
         try:
-            # Формат: (f1, f2, x_от, x_до, стиль, границы, плотность)
+            r = repr(float(v))
+            if len(r) <= 8:
+                return Rational(r)
+        except Exception:
+            pass
+        return None
+
+    def area_label_text(area, exact):
+        """«S = 1/3» (точно) или «S ≈ 1.234»."""
+        if exact is not None:
+            return math_label("S = " + fmt_sym_tex(exact)) if TEX else "S = " + fmt_sym(exact)
+        txt = f"{area:.4g}"
+        return math_label("S \\approx " + txt) if TEX else "S ≈ " + txt
+
+    def annotate_area(fi, xc, yc, text, color):
+        """Подпись площади в центре заливки; перетаскивается, смещение запоминается."""
+        home = (xc, yc)
+        off_key = ("area", int(fi), 0.0)
+        off = ANNOTATION_OFFSETS.get(off_key)
+        tx, ty = home
+        if off:
+            try:
+                tx = home[0] + float(off[0]) * pt_to_x
+                ty = home[1] + float(off[1]) * pt_to_y
+            except Exception:
+                tx, ty = home
+        ann = ax.annotate(text, xy=home, xytext=(tx, ty), xycoords='data', textcoords='data',
+                          ha='center', va='center', fontsize=_FS, color=color,
+                          bbox=dict(boxstyle='round,pad=0.3', fc=FIG_BG, ec=color, alpha=0.9, lw=0.8),
+                          annotation_clip=False, zorder=11)
+        draggables.append(DraggableAnnotation(ann, key=off_key, home=home,
+                                              pt_scale=(pt_to_x, pt_to_y)))
+        return ann
+
+    def fill_area(fi, f1_func, f2_func, a, b, raw_a, raw_b, meta1, meta2):
+        """
+        Площадь между f1 и f2 на [a, b] (геометрическая, ∫|f1 − f2|dx).
+        Возвращает (число, точное выражение или None). Точная форма — через
+        sympy.integrate в фоновом потоке (sym_cached), только если разность
+        не меняет знак на отрезке и результат совпадает с численным.
+        """
+        xs = np.linspace(a, b, 4001)
+        y1 = _eval_array(f1_func, xs)
+        y2 = _eval_array(f2_func, xs) if f2_func is not None else np.zeros_like(y1)
+        d = y1 - y2
+        ok = np.isfinite(d)
+        if ok.sum() < 2:
+            return None, None
+        _trap = getattr(np, 'trapezoid', None) or getattr(np, 'trapz')     # numpy 2.x / 1.x
+        area = float(_trap(np.abs(d[ok]), xs[ok]))
+        if not math.isfinite(area):
+            return None, None
+        exact = None
+        try:
+            e1 = meta1.get('expr') if meta1 else None
+            e2 = meta2.get('expr') if meta2 else (Integer(0) if f2_func is None else None)
+            if e1 is not None and e2 is not None and ok.all():
+                dmin, dmax = float(d.min()), float(d.max())
+                tol = 1e-9 * max(1.0, abs(dmin), abs(dmax))
+                if dmin >= -tol or dmax <= tol:          # знак постоянен
+                    ea, eb = _exact_bound(a, raw_a), _exact_bound(b, raw_b)
+                    if ea is not None and eb is not None:
+                        diff = e1 - e2
+                        key = ('area', _ekey(diff), str(ea), str(eb))
+
+                        def _job(diff=diff, ea=ea, eb=eb):
+                            from sympy import integrate, Abs as _Abs, simplify
+                            val = integrate(diff, (_X_SYM, ea, eb))
+                            val = simplify(_Abs(val))
+                            if val.free_symbols or val.has(oo, -oo, zoo, nan):
+                                return None
+                            return val
+                        cand = sym_cached(key, _job)
+                        if cand is not None:
+                            try:
+                                if abs(float(cand) - area) <= 1e-6 * max(1.0, area) + 1e-9:
+                                    exact = cand
+                            except Exception:
+                                exact = None
+        except SymbolicPending:
+            exact = None
+        except Exception:
+            exact = None
+        return area, exact
+
+    for fi, fill_entry in enumerate(FILL):
+        try:
+            # Формат: (f1, f2, x_от, x_до, стиль, границы, плотность[, площадь, от_строка, до_строка])
             f1_idx, f2, fx_from, fx_to, fill_style = fill_entry[:5]
             show_borders = fill_entry[5] if len(fill_entry) > 5 else True
             density      = fill_entry[6] if len(fill_entry) > 6 else 0.01
+            show_area    = bool(fill_entry[7]) if len(fill_entry) > 7 else False
+            raw_from     = fill_entry[8] if len(fill_entry) > 8 else None
+            raw_to       = fill_entry[9] if len(fill_entry) > 9 else None
+            full_from, full_to = fx_from, fx_to          # границы интеграла — как задал пользователь
 
             if f1_idx >= len(func_data):
                 continue
@@ -3813,6 +3909,19 @@ def _plot_function_impl(fig=None):
                             fill_color, X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T,
                             density=density, ax_px=(_ax_w_px, _ax_h_px))
 
+            # Число площади (интеграл) в центре видимой части заливки
+            if show_area and math.isfinite(full_from) and math.isfinite(full_to) and full_from < full_to:
+                f2_func_a = None if (isinstance(f2, str) or f2 is None) else func_data[f2][0]
+                meta1 = curve_meta[f1_idx] if f1_idx < len(curve_meta) else None
+                meta2 = (None if f2_func_a is None else
+                         (curve_meta[f2] if f2 < len(curve_meta) else None))
+                area, exact = fill_area(fi, f1_func, f2_func_a, full_from, full_to,
+                                        raw_from, raw_to, meta1, meta2)
+                if area is not None and valid.any():
+                    xc = float(np.mean(xf[valid]))
+                    yc = float(np.mean((y1_fill[valid] + y2_fill[valid]) / 2.0))
+                    annotate_area(fi, xc, yc, area_label_text(area, exact), color1)
+
             # Вертикальные линии-границы по краям
             if show_borders:
                 for xb in [fx_from, fx_to]:
@@ -3828,6 +3937,7 @@ def _plot_function_impl(fig=None):
                                 linewidth=1.2, zorder=5)
         except Exception:
             # Некорректная запись заливки не должна ронять график
+            logging.getLogger(__name__).debug("fill entry %r skipped", fill_entry, exc_info=True)
             continue
 
     _active_free_text_manager = FreeTextManager(fig, ax, font_size=_FS)

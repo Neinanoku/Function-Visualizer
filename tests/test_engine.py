@@ -864,6 +864,28 @@ def test_edge_ticks_quarter_step_rule():
         fv.EXTEND_TO_CANVAS = True
 
 
+def test_fill_area_label():
+    """Число площади у заливки: точное «S = 1/3» для ∫₀¹ x² dx, численное при смене знака, без галочки — нет."""
+    fig = Figure(figsize=(8, 6), dpi=100)
+    FigureCanvasAgg(fig)
+    fv.SYMBOLIC_MODE = 'compute'
+    # f0 = x², заливка до оси X на [0, 1], площадь показывать
+    res = draw(["x^2"], fig=fig, FILL=[(0, "x", 0.0, 1.0, 0, True, 0.02, True, "0", "1")])
+    labels = [t.get_text() for t in res['ax'].texts if t.get_text().startswith("S")]
+    assert labels and ("1/3" in labels[0]), labels
+    # разность меняет знак (x на [-1, 1]) — только численно: ∫|x| = 1
+    res = draw(["x"], fig=fig, FILL=[(0, "x", -1.0, 1.0, 0, True, 0.02, True, "-1", "1")])
+    labels = [t.get_text() for t in res['ax'].texts if t.get_text().startswith("S")]
+    assert labels and "≈" in labels[0] and "1" in labels[0], labels
+    # между двумя функциями: x² и x на [0, 1] → 1/6
+    res = draw(["x^2", "x"], fig=fig, FILL=[(0, 1, 0.0, 1.0, 0, True, 0.02, True, "0", "1")])
+    labels = [t.get_text() for t in res['ax'].texts if t.get_text().startswith("S")]
+    assert labels and "1/6" in labels[0], labels
+    # галочка снята — подписи нет
+    res = draw(["x^2"], fig=fig, FILL=[(0, "x", 0.0, 1.0, 0, True, 0.02, False, "0", "1")])
+    assert not [t for t in res['ax'].texts if t.get_text().startswith("S")]
+
+
 def test_grid_far_from_origin():
     """Сетка и деления строятся на любом расстоянии от начала координат (баг: пропадали дальше ±12)."""
     for (xl, xr, yb, yt) in ((100, 110, 200, 210), (-18, -8, 6.5, 16.5), (1e6, 1e6 + 10, -5, 5)):

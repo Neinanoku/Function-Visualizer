@@ -257,6 +257,7 @@ STRINGS_HE = {
     "w:": "עובי:", "domain:": "תחום:", "Solid": "רציף", "Dashed": "מקווקו", "Dotted": "נקודות",
     "Pick color for f{idx}": "בחר צבע עבור f{idx}",
     "from:": "מ:", "to:": "עד:", "style:": "סגנון:", "borders": "קצוות", "density:": "צפיפות:",
+    "area value": "ערך השטח", "Hide function": "הסתר פונקציה", "Show function": "הצג פונקציה",
     "45deg ////": "45° ////", "135deg \\\\": "135° \\\\", "Dots ....": "נקודות ....",
     # диалоги
     "Cannot delete": "לא ניתן למחוק", "At least one function is required.": "נדרשת לפחות פונקציה אחת.",
@@ -374,6 +375,7 @@ STRINGS_RU = {
     "w:": "толщ.:", "domain:": "ОДЗ:", "Solid": "Сплошная", "Dashed": "Штриховая", "Dotted": "Пунктир",
     "Pick color for f{idx}": "Цвет для f{idx}",
     "from:": "от:", "to:": "до:", "style:": "стиль:", "borders": "границы", "density:": "плотность:",
+    "area value": "площадь", "Hide function": "Скрыть функцию", "Show function": "Показать функцию",
     "45deg ////": "45° ////", "135deg \\\\": "135° \\\\", "Dots ....": "Точки ....",
     # диалоги
     "Cannot delete": "Нельзя удалить", "At least one function is required.": "Нужна хотя бы одна функция.",
@@ -979,6 +981,14 @@ class FuncRow:
                                   bg=PANEL_BG, fg=SUBTEXT, font=(UI_FONT, 9, "bold"))
         self.idx_label.pack(side=S, padx=(6, 2))
 
+        # Глазок: показать/скрыть кривую (строка и настройки остаются)
+        self.visible = True
+        self.eye = tk.Button(self.frame, text="◉", bg=PANEL_BG, fg=TEXT, activebackground=PANEL_BG,
+                             relief="flat", bd=0, cursor="hand2", font=(UI_FONT, 11), padx=2,
+                             command=self.toggle_visible)
+        self.eye.pack(side=S, padx=(0, 2))
+        self._eye_tip = Tooltip(self.eye, T("Hide function"))
+
         # Кликабельный цветной квадрат — выбор цвета
         self.dot = tk.Button(self.frame, bg=self.color, activebackground=self.color,
                              width=2, height=1, relief="flat", bd=0,
@@ -1033,6 +1043,17 @@ class FuncRow:
                  font=(UI_FONT, 8)).pack(side=S)
         self.dom_to = live_entry(self.frame2, 6, "inf", on_change)
         self.dom_to.pack(side=S, padx=2)
+
+    # ── глазок ───────────────────────────────────────────────
+    def toggle_visible(self):
+        self.set_visible(not self.visible)
+        self.on_change()
+
+    def set_visible(self, flag):
+        self.visible = bool(flag)
+        self.eye.config(text="◉" if self.visible else "○", fg=TEXT if self.visible else SUBTEXT)
+        self.idx_label.config(fg=SUBTEXT if self.visible else BORDER)
+        self._eye_tip.text = T("Hide function") if self.visible else T("Show function")
 
     # ── ширина ───────────────────────────────────────────────
     def _lw_step(self, d):
@@ -1107,6 +1128,7 @@ class FuncRow:
             "width": self.get_linewidth(),
             "style": self._style_key(),
             "domain": [self.dom_from.get(), self.dom_to.get()],
+            "hidden": not self.visible,
         }
 
     def from_dict(self, d):
@@ -1134,6 +1156,7 @@ class FuncRow:
         dom = d.get("domain", ["-inf", "inf"])
         self.dom_from.var.set(str(dom[0]))
         self.dom_to.var.set(str(dom[1]))
+        self.set_visible(not d.get("hidden", False))
 
     def destroy(self):
         self.frame.destroy()
@@ -1293,8 +1316,13 @@ class FillRow:
                  command=_on_density, font=(UI_FONT, 7)).pack(side=S)
         self._density_ind.pack(side=S, padx=(4, 0))
 
+        # Число площади (интеграл) рядом со штриховкой
+        self.area_var = tk.IntVar(value=1)
+        self.area_var.trace_add("write", lambda *_: on_change())
+        make_check(self.frame2, "area value", self.area_var, bg=PANEL_BG).pack(side=S, padx=(10, 4))
+
     def get(self):
-        """Returns tuple (f1, f2, x_from, x_to, style, borders, density) or None on error."""
+        """Returns tuple (f1, f2, x_from, x_to, style, borders, density, show_area, from_str, to_str) or None on error."""
         try:
             f1 = int(self.f1.get().strip())
             f2_raw = self.f2.get().strip()
@@ -1306,14 +1334,16 @@ class FillRow:
             # density: 0%→step=0.05 (редко),  100%→step=0.01 (густо)
             pct     = self.density_var.get() / 100.0
             density = 0.05 - pct * 0.04
-            return (f1, f2, x_from, x_to, style, borders, density)
+            return (f1, f2, x_from, x_to, style, borders, density, bool(self.area_var.get()),
+                    self.x_from.get().strip(), self.x_to.get().strip())
         except Exception:
             return None
 
     def to_dict(self):
         return {"f1": self.f1.get(), "f2": self.f2.get(), "from": self.x_from.get(),
                 "to": self.x_to.get(), "style": self.STYLES[self._style_names.index(self.style_var.get())],
-                "borders": self.borders_var.get(), "density": self.density_var.get()}
+                "borders": self.borders_var.get(), "density": self.density_var.get(),
+                "area": self.area_var.get()}
 
     def from_dict(self, d):
         self.f1.var.set(str(d.get("f1", "0")))
@@ -1325,6 +1355,7 @@ class FillRow:
         self.borders_var.set(int(d.get("borders", 1)))
         self.density_var.set(int(d.get("density", 100)))
         self._density_ind.config(text=str(self.density_var.get()))
+        self.area_var.set(int(d.get("area", 1)))
 
     def destroy(self):
         self.frame.destroy()
@@ -1951,9 +1982,9 @@ class App(tk.Tk):
         funcs, colors, widths, styles, domains = [], [], [], [], []
         self._incomplete_rows = 0
         for r in self.func_rows:
-            if r.is_empty():
+            if r.is_empty() or not r.visible:
                 r.editor.set_error(None)
-                funcs.append("")       # пустая строка = нет кривой (индексы стабильны)
+                funcs.append("")       # пустая/скрытая строка = нет кривой (индексы стабильны)
             else:
                 try:
                     funcs.append(r.get())
