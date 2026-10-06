@@ -1360,7 +1360,7 @@ class ParamRow:
 class FillRow:
     """Область заливки: точка внутри неё (щелчок по графику или ввод), стиль и
     плотность штриховки, галочка подписи площади и текущее значение площади."""
-    STYLES = ["45deg ////", "135deg \\\\\\\\", "Dots ...."]
+    STYLES = ["45deg ////", "135deg \\\\", "Dots ...."]
 
     def __init__(self, parent, on_delete, on_change, on_pick):
         self.frame = tk.Frame(parent, bg=PANEL_BG)
@@ -1483,8 +1483,11 @@ class FillRow:
     def from_dict(self, d):
         self.x_e.var.set(str(d.get("x", "")))
         self.y_e.var.set(str(d.get("y", "")))
-        if d.get("style") in self.STYLES:
-            self.style_var.set(self._style_names[self.STYLES.index(d["style"])])
+        style = str(d.get("style", ""))
+        for i, name in enumerate(self.STYLES):          # по началу строки: в старых проектах
+            if style.startswith(name.split()[0]):        # «135deg» записан с другими косыми
+                self.style_var.set(self._style_names[i])
+                break
         self.density_var.set(int(d.get("density", 100)))
         self._density_ind.config(text=str(self.density_var.get()))
         self.area_var.set(int(d.get("area", 1)))
