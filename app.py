@@ -302,9 +302,9 @@ STRINGS_HE = {
         "לחיצה כפולה על מקום ריק בגרף מוסיפה תווית. גרירה - הזזה, גלגלת - סיבוב, "
         "לחיצה ימנית - אפשרויות. גם תוויות נקודות ניתנות לגרירה.",
     "Clear all labels": "נקה את כל התוויות",
-    "Hover a curve to read a point; click to pin it, drag the pin along the curve, "
+    "Hover a curve to read a point. Click to pin it, drag the pin along the curve, "
     "right-click to delete it.":
-        "ריחוף מעל עקומה מציג נקודה; לחיצה מקבעת אותה, גרירה מזיזה לאורך העקומה, "
+        "ריחוף מעל עקומה מציג נקודה. לחיצה מקבעת אותה, גרירה מזיזה לאורך העקומה, "
         "לחיצה ימנית מוחקת.",
     "  Save image…": "שמור תמונה…", "  Export…": "ייצוא…", "Reset view": "איפוס תצוגה",
     "Export": "ייצוא", "Image": "תמונה", "Format:": "פורמט:", "Scale:": "קנה מידה:", "vector": "וקטור",
@@ -436,9 +436,9 @@ STRINGS_RU = {
         "Двойной щелчок по пустому месту графика добавляет подпись. Перетаскивание - перемещение, "
         "колесо - поворот, правая кнопка - меню. Подписи точек тоже можно перетаскивать.",
     "Clear all labels": "Удалить все подписи",
-    "Hover a curve to read a point; click to pin it, drag the pin along the curve, "
+    "Hover a curve to read a point. Click to pin it, drag the pin along the curve, "
     "right-click to delete it.":
-        "Наведите на кривую, чтобы увидеть точку; щелчок закрепляет её, перетаскивание двигает "
+        "Наведите на кривую, чтобы увидеть точку. Щелчок закрепляет её, перетаскивание двигает "
         "вдоль кривой, правая кнопка удаляет.",
     "  Save image…": "  Сохранить картинку…", "  Export…": "  Экспорт…", "Reset view": "Сбросить вид",
     "Export": "Экспорт", "Image": "Картинка", "Format:": "Формат:", "Scale:": "Масштаб:", "vector": "вектор",
@@ -2486,7 +2486,7 @@ class App(tk.Tk):
         hint = (T("Double-click empty space on the graph to add a label. "
                   "Drag to move, scroll to rotate, right-click for options. "
                   "Point labels can be dragged too.") + " " +
-                T("Hover a curve to read a point; click to pin it, drag the pin along the curve, "
+                T("Hover a curve to read a point. Click to pin it, drag the pin along the curve, "
                   "right-click to delete it."))
         make_paragraph(labels_card, hint, size=8, color=SUBTEXT, bg=CARD_BG,
                        width_px=_px(LEFT_PANEL_WIDTH - 60)).pack(anchor=anchor_start(), fill="x",
@@ -3403,7 +3403,7 @@ class App(tk.Tk):
         import csv
         header, rows, points = self.table_rows()
         ru = LANG == "ru"                      # русский Excel: разделитель «;», десятичная «,»
-        delim, dec = (";", ",") if ru else (",", ".")
+        delim, dec = (";", ",") if ru else (",", ".")      # typography: ok (разделитель CSV, не текст)
 
         def num(v):
             if isinstance(v, str):
