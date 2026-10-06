@@ -306,7 +306,17 @@ STRINGS_HE = {
     "right-click to delete it.":
         "ריחוף מעל עקומה מציג נקודה; לחיצה מקבעת אותה, גרירה מזיזה לאורך העקומה, "
         "לחיצה ימנית מוחקת.",
-    "  Save image…": "שמור תמונה…", "Reset view": "איפוס תצוגה",
+    "  Save image…": "שמור תמונה…", "  Export…": "ייצוא…", "Reset view": "איפוס תצוגה",
+    "Export": "ייצוא", "Image": "תמונה", "Format:": "פורמט:", "Scale:": "קנה מידה:", "vector": "וקטור",
+    "Transparent background": "רקע שקוף", "Copy to clipboard": "העתק ללוח", "Save image…": "שמור תמונה…",
+    "Table of values": "טבלת ערכים",
+    "Values of the visible functions at the grid step of the current window, "
+    "plus the special points and probes. Opens in Excel.":
+        "ערכי הפונקציות הגלויות בצעד הסריג של החלון הנוכחי, בתוספת הנקודות המיוחדות והמדידות. נפתח ב-Excel.",
+    "Save table (CSV)…": "שמור טבלה (CSV)…", "Close": "סגור", "CSV table": "טבלת CSV",
+    "Image copied to clipboard": "התמונה הועתקה ללוח",
+    "Clipboard image copy is not available on this system": "העתקת תמונה ללוח אינה זמינה במערכת זו",
+    "Table saved: {path}": "הטבלה נשמרה: {path}", "Point": "נקודה", "probe": "מדידה",
     "↶ Undo": "↶ בטל", "↷ Redo": "↷ חזור",
     "Theme": "ערכת נושא", "Theme:": "ערכת נושא:", "Light": "בהיר", "Dark": "כהה", "Print": "הדפסה",
     "Save project": "שמור פרויקט", "Open project": "פתח פרויקט",
@@ -430,7 +440,17 @@ STRINGS_RU = {
     "right-click to delete it.":
         "Наведите на кривую, чтобы увидеть точку; щелчок закрепляет её, перетаскивание двигает "
         "вдоль кривой, правая кнопка удаляет.",
-    "  Save image…": "  Сохранить картинку…", "Reset view": "Сбросить вид",
+    "  Save image…": "  Сохранить картинку…", "  Export…": "  Экспорт…", "Reset view": "Сбросить вид",
+    "Export": "Экспорт", "Image": "Картинка", "Format:": "Формат:", "Scale:": "Масштаб:", "vector": "вектор",
+    "Transparent background": "Прозрачный фон", "Copy to clipboard": "Копировать в буфер",
+    "Save image…": "Сохранить картинку…", "Table of values": "Таблица значений",
+    "Values of the visible functions at the grid step of the current window, "
+    "plus the special points and probes. Opens in Excel.":
+        "Значения видимых функций с шагом сетки в текущем окне, плюс особые точки и щупы. Открывается в Excel.",
+    "Save table (CSV)…": "Сохранить таблицу (CSV)…", "Close": "Закрыть", "CSV table": "Таблица CSV",
+    "Image copied to clipboard": "Картинка скопирована в буфер обмена",
+    "Clipboard image copy is not available on this system": "Копирование картинки в буфер недоступно в этой системе",
+    "Table saved: {path}": "Таблица сохранена: {path}", "Point": "Точка", "probe": "щуп",
     "↶ Undo": "↶ Отмена", "↷ Redo": "↷ Повтор",
     "Theme": "Тема", "Theme:": "Тема:", "Light": "Светлая", "Dark": "Тёмная", "Print": "Печать",
     "Save project": "Сохранить проект", "Open project": "Открыть проект",
@@ -1429,6 +1449,183 @@ class FillRow:
 
 
 # ═════════════════════════════════════════════════════════════
+#  ЭКСПОРТ: окно с форматом, масштабом, прозрачностью, буфером обмена, CSV
+# ═════════════════════════════════════════════════════════════
+
+def _tex_to_plain(label):
+    """Подпись точки из mathtext → обычный текст для таблицы: \\sqrt{2} → √2, \\frac{a}{b} → a/b, \\pi → π."""
+    t = str(label).replace("$", "")
+    def _frac(m):
+        a, b = m.group(1), m.group(2)
+        if re.search(r"[+\-]", a[1:]):                     # многочлен в числителе → скобки
+            a = f"({a})"
+        if re.search(r"[+\-]", b[1:]):
+            b = f"({b})"
+        return f"{a}/{b}"
+    for _ in range(4):                                 # вложенные дроби/корни
+        t = re.sub(r"\\sqrt\{([^{}]*)\}", r"√\1", t)
+        t = re.sub(r"\\frac\{([^{}]*)\}\{([^{}]*)\}", _frac, t)
+    t = (t.replace("\\pi", "π").replace("\\infty", "∞").replace("\\cdot", "·")
+          .replace("\\,", " ").replace("\\ ", " ").replace("\\left", "").replace("\\right", "")
+          .replace("{", "").replace("}", "").replace("\\", ""))
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _win_clipboard_image(png_bytes):
+    """PNG → буфер обмена Windows: CF_DIB (все приложения) и формат «PNG» (Word, браузеры)."""
+    try:
+        import ctypes
+        import io
+        from ctypes import wintypes
+        from PIL import Image
+        img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+        bg = Image.new("RGBA", img.size, fv.plot_background())
+        bmp = Image.alpha_composite(bg, img).convert("RGB")
+        out = io.BytesIO(); bmp.save(out, "BMP"); dib = out.getvalue()[14:]   # без файлового заголовка
+        user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+        kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+        user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+        GMEM_MOVEABLE = 0x0002
+        CF_DIB = 8
+        if not user32.OpenClipboard(None):
+            return False
+        try:
+            user32.EmptyClipboard()
+            for fmt, payload in ((CF_DIB, dib), (user32.RegisterClipboardFormatW("PNG"), png_bytes)):
+                h = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(payload))
+                ptr = kernel32.GlobalLock(h)
+                ctypes.memmove(ptr, payload, len(payload))
+                kernel32.GlobalUnlock(h)
+                user32.SetClipboardData(fmt, h)
+        finally:
+            user32.CloseClipboard()
+        return True
+    except Exception:
+        log_exception("clipboard image")
+        return False
+
+
+class ExportDialog(tk.Toplevel):
+    """Окно экспорта: формат (PNG/SVG/PDF), масштаб PNG, прозрачный фон,
+    копирование в буфер обмена, сохранение файла, таблица значений (CSV)."""
+
+    SCALES = [1, 2, 3, 4]
+
+    def __init__(self, app):
+        super().__init__(app)
+        self.app = app
+        self.title(he_display(T("Export")))
+        self.configure(bg=APP_BG)
+        self.resizable(False, False)
+        self.transient(app)
+        box = tk.Frame(self, bg=CARD_BG, padx=_px(16), pady=_px(12))
+        box.pack(padx=_px(12), pady=_px(12))
+
+        S = side()
+        make_label(box, "Image", size=10, color=ACCENT, bold=True, bg=CARD_BG).pack(anchor=anchor_start())
+        r1 = tk.Frame(box, bg=CARD_BG); r1.pack(fill="x", pady=(4, 2))
+        make_label(r1, "Format:", size=9, bg=CARD_BG).pack(side=S, padx=(0, 6))
+        self.fmt = tk.StringVar(value="png")
+        for name, val in (("PNG", "png"), ("SVG", "svg"), ("PDF", "pdf")):
+            tk.Radiobutton(r1, text=name, value=val, variable=self.fmt, bg=CARD_BG, fg=TEXT,
+                           selectcolor=ENTRY_BG, activebackground=CARD_BG, activeforeground=TEXT,
+                           font=(UI_FONT, 9), bd=0, highlightthickness=0,
+                           command=self._sync).pack(side=S, padx=(0, 8))
+        r2 = tk.Frame(box, bg=CARD_BG); r2.pack(fill="x", pady=2)
+        make_label(r2, "Scale:", size=9, bg=CARD_BG).pack(side=S, padx=(0, 6))
+        self.scale = tk.IntVar(value=2)
+        self._scale_btns = []
+        for sc in self.SCALES:
+            b = tk.Radiobutton(r2, text=f"{sc}×", value=sc, variable=self.scale, bg=CARD_BG, fg=TEXT,
+                               selectcolor=ENTRY_BG, activebackground=CARD_BG, activeforeground=TEXT,
+                               font=(UI_FONT, 9), bd=0, highlightthickness=0)
+            b.pack(side=S, padx=(0, 8))
+            self._scale_btns.append(b)
+        self._size_label = make_label(r2, "", size=8, bg=CARD_BG)
+        self._size_label.pack(side=S, padx=(6, 0))
+        self.transparent = tk.IntVar(value=0)
+        make_check(box, "Transparent background", self.transparent, bg=CARD_BG).pack(anchor=anchor_start(), pady=2)
+        r3 = tk.Frame(box, bg=CARD_BG); r3.pack(fill="x", pady=(6, 10))
+        small_button(r3, "Copy to clipboard", self._copy, bg=BTN_BLUE).pack(side=S)
+        small_button(r3, "Save image…", self._save, bg=BTN_SAVE).pack(side=S, padx=(8, 0))
+
+        tk.Frame(box, bg=BORDER, height=1).pack(fill="x", pady=(0, 8))
+        make_label(box, "Table of values", size=10, color=ACCENT, bold=True, bg=CARD_BG).pack(anchor=anchor_start())
+        make_paragraph(box, "Values of the visible functions at the grid step of the current window, "
+                            "plus the special points and probes. Opens in Excel.",
+                       size=8, color=SUBTEXT, bg=CARD_BG, width_px=_px(360)).pack(anchor=anchor_start(), fill="x", pady=(2, 6))
+        r4 = tk.Frame(box, bg=CARD_BG); r4.pack(fill="x")
+        small_button(r4, "Save table (CSV)…", self._save_csv, bg=BTN_BLUE).pack(side=S)
+        small_button(r4, "Close", self.destroy, bg=BTN_DEL).pack(side=oside())
+        self.scale.trace_add("write", lambda *_: self._sync())
+        self._sync()
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.update_idletasks()
+        x = app.winfo_rootx() + (app.winfo_width() - self.winfo_reqwidth()) // 2
+        y = app.winfo_rooty() + (app.winfo_height() - self.winfo_reqheight()) // 3
+        self.geometry(f"+{max(0, x)}+{max(0, y)}")
+        self.grab_set()
+
+    def _sync(self):
+        is_png = self.fmt.get() == "png"
+        for b in self._scale_btns:
+            b.config(state="normal" if is_png else "disabled")
+        try:
+            w = self.app.canvas.get_tk_widget()
+            k = self.scale.get() if is_png else 1
+            txt = f"≈ {w.winfo_width() * k} × {w.winfo_height() * k} px" if is_png else T("vector")
+        except Exception:
+            txt = ""
+        for child in self._size_label.winfo_children() if isinstance(self._size_label, tk.Frame) else [self._size_label]:
+            try:
+                child.config(text=txt)
+            except Exception:
+                pass
+
+    def _copy(self):
+        ok = False
+        try:
+            ok = self.app.copy_image_to_clipboard(self.scale.get())
+        except Exception:
+            log_exception("copy image")
+        if ok:
+            self.app._set_status(T("Image copied to clipboard"), BTN_ADD)
+        else:
+            self.app._set_status(T("Clipboard image copy is not available on this system"), ERR_COLOR)
+
+    def _save(self):
+        fmt = self.fmt.get()
+        types = {"png": (he_display(T("PNG image")), "*.png"), "svg": (he_display(T("SVG vector")), "*.svg"),
+                 "pdf": ("PDF", "*.pdf")}
+        path = filedialog.asksaveasfilename(
+            parent=self, title=he_display(T("Save graph image")), defaultextension="." + fmt,
+            filetypes=[types[fmt], (he_display(T("All files")), "*.*")], initialfile="graph." + fmt)
+        if not path:
+            return
+        try:
+            self.app.save_image_file(path, fmt, self.scale.get(), bool(self.transparent.get()))
+            self.app._set_status(T("Saved: {path}", path=path), BTN_ADD)
+        except Exception as ex:
+            messagebox.showerror(he_display(T("Save error")), str(ex), parent=self)
+
+    def _save_csv(self):
+        path = filedialog.asksaveasfilename(
+            parent=self, title=he_display(T("Save table (CSV)…")), defaultextension=".csv",
+            filetypes=[(he_display(T("CSV table")), "*.csv"), (he_display(T("All files")), "*.*")],
+            initialfile="table.csv")
+        if not path:
+            return
+        try:
+            self.app.save_table_csv(path)
+            self.app._set_status(T("Table saved: {path}", path=path), BTN_ADD)
+        except Exception as ex:
+            messagebox.showerror(he_display(T("Save error")), str(ex), parent=self)
+
+
+# ═════════════════════════════════════════════════════════════
 #  ЩУП: точка на кривой под курсором, закреплённые точки
 # ═════════════════════════════════════════════════════════════
 
@@ -2234,7 +2431,7 @@ class App(tk.Tk):
         bar = tk.Frame(parent, bg=APP_BG)
         bar.pack(fill="x", padx=10, pady=(10, 4))
 
-        small_button(bar, "  Save image…", self._save_image, bg=BTN_SAVE,
+        small_button(bar, "  Export…", self._save_image, bg=BTN_SAVE,
                      font=(UI_FONT, 11, "bold"), padx=16, pady=7).pack(side=side())
         small_button(bar, "Reset view", self._reset_view, bg=BTN_DEL,
                      pady=7).pack(side=side(), padx=(8, 0))
@@ -3020,19 +3217,109 @@ class App(tk.Tk):
     #  СОХРАНЕНИЕ
     # ══════════════════════════════════════════════════════════
     def _save_image(self):
-        path = filedialog.asksaveasfilename(
-            title=he_display(T("Save graph image")),
-            defaultextension=".png",
-            filetypes=[(he_display(T("PNG image")), "*.png"), (he_display(T("SVG vector")), "*.svg"),
-                       ("PDF", "*.pdf"), (he_display(T("All files")), "*.*")],
-            initialfile="graph.png")
-        if not path:
-            return
+        ExportDialog(self)
+
+    # ── экспорт: картинка (файл / буфер обмена) и таблица значений ──
+    def render_image(self, fmt="png", scale=2, transparent=False):
+        """Байты картинки текущего графика. scale — во сколько раз крупнее экрана (PNG)."""
+        import io
+        buf = io.BytesIO()
+        kw = dict(format=fmt, bbox_inches="tight", pad_inches=0.05)
+        if transparent:
+            kw["transparent"] = True
+        else:
+            kw["facecolor"] = fv.plot_background()
+        if fmt == "png":
+            kw["dpi"] = self.fig.dpi * max(1, float(scale))
+        self.fig.savefig(buf, **kw)
+        return buf.getvalue()
+
+    def save_image_file(self, path, fmt, scale, transparent):
+        data = self.render_image(fmt, scale, transparent)
+        with open(path, "wb") as f:
+            f.write(data)
+
+    def copy_image_to_clipboard(self, scale=2):
+        """PNG графика в буфер обмена: Windows — через GDI (CF_DIB + формат «PNG»),
+        Linux/macOS — через xclip / wl-copy / pbcopy, если они есть."""
+        data = self.render_image("png", scale, transparent=False)
+        if sys.platform == "win32":
+            return _win_clipboard_image(data)
+        import shutil
+        import subprocess
+        for cmd in (["xclip", "-selection", "clipboard", "-t", "image/png", "-i"],
+                    ["wl-copy", "--type", "image/png"]):
+            if shutil.which(cmd[0]):
+                subprocess.run(cmd, input=data, check=False)
+                return True
+        if sys.platform == "darwin" and shutil.which("osascript"):
+            import tempfile
+            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            tmp.write(data); tmp.close()
+            subprocess.run(["osascript", "-e",
+                            f'set the clipboard to (read (POSIX file "{tmp.name}") as «class PNGf»)'],
+                           check=False)
+            return True
+        return False
+
+    def table_rows(self):
+        """
+        Таблица значений: (заголовок, строки) по видимым функциям на сетке
+        текущего окна (шаг X) плюс особые точки и щупы.
+        """
+        ax = self.fig.axes[0] if self.fig.axes else None
+        if ax is None:
+            return [], []
+        xl, xr = ax.get_xlim()
         try:
-            self.fig.savefig(path, dpi=200, bbox_inches="tight", facecolor=fv.plot_background())
-            self._set_status(T("Saved: {path}", path=path), BTN_ADD)
-        except Exception as ex:
-            messagebox.showerror(he_display(T("Save error")), str(ex))
+            step = fv.parse_number(self.xgrid_e.get())
+        except Exception:
+            step = 1.0
+        if not (step > 0) or (xr - xl) / step > 2000:
+            step = (xr - xl) / 20.0
+        k0 = math.ceil(xl / step - 1e-9); k1 = math.floor(xr / step + 1e-9)
+        xs = [round(k * step, 10) for k in range(k0, k1 + 1)]
+        funcs = [(i, r) for i, r in enumerate(self.func_rows)
+                 if r.visible and not r.is_empty() and i < len(fv.LAST_CURVES)
+                 and fv.LAST_CURVES[i].get('kind') == 'func']
+        header = ["x"] + [f"f{i} = {r.editor.model.to_display()}" for i, r in funcs]
+        rows = []
+        for x in xs:
+            row = [x]
+            for i, _r in funcs:
+                try:
+                    y = float(fv._eval_array(fv.LAST_CURVES[i]['f'], np.array([x]))[0])
+                except Exception:
+                    y = float('nan')
+                row.append(y if math.isfinite(y) else "")
+            rows.append(row)
+        points = [(p.get('label') or "", p['x'], p['y']) for p in fv.LAST_POINTS.values()]
+        points += [(T("probe") + f" f{p['f']}", p['x'], p['y']) for p in self.probe.pins]
+        points.sort(key=lambda t: (t[1], t[2]))
+        return header, rows, points
+
+    def save_table_csv(self, path):
+        import csv
+        header, rows, points = self.table_rows()
+        ru = LANG == "ru"                      # русский Excel: разделитель «;», десятичная «,»
+        delim, dec = (";", ",") if ru else (",", ".")
+
+        def num(v):
+            if isinstance(v, str):
+                return v
+            t = f"{v:.6g}"
+            return t.replace(".", dec) if ru else t
+
+        with open(path, "w", encoding="utf-8-sig", newline="") as f:
+            w = csv.writer(f, delimiter=delim)
+            w.writerow(header)
+            for row in rows:
+                w.writerow([num(v) for v in row])
+            if points:
+                w.writerow([])
+                w.writerow([T("Point"), "x", "y"])
+                for label, x, y in points:
+                    w.writerow([_tex_to_plain(label), num(x), num(y)])
 
     # ── проект (все настройки + подписи) ─────────────────────
     def _project_dict(self):
@@ -3178,7 +3465,7 @@ class App(tk.Tk):
 #  ВЫБОР ЯЗЫКА ПРИ ЗАПУСКЕ
 # ═════════════════════════════════════════════════════════════
 
-VERSION = "4.1"
+VERSION = "4.2"
 
 # (код, название на самом языке, клавиша)
 LANGUAGES = [("en", "English", "1"), ("he", "עברית", "2"), ("ru", "Русский", "3")]

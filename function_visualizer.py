@@ -457,6 +457,9 @@ _DRAW_STATE = {'pending': False}    # было ли что-то отложено
 # {'kind': 'func'|'implicit'|'vline'|'error', 'color', 'f', 'domain', 'expr',
 #  'segs' (ломаные неявной кривой), 'x' (вертикаль)} — по индексам FUNCS.
 LAST_CURVES = []
+# Особые точки последнего построения (нули, экстремумы, пересечения, дырки…):
+# {(x, y): {'x', 'y', 'label'}} — для экспорта таблицы значений.
+LAST_POINTS = {}
 # Приложение может поставить сюда функцию event → bool: «под курсором уже
 # есть свой объект» (щуп) — тогда меню свободных подписей не открывается.
 PRESS_HIT_HOOK = None
@@ -3109,6 +3112,7 @@ def _plot_function_impl(fig=None):
 
     _DRAW_STATE['pending'] = False
     _disconnect_previous()
+    LAST_POINTS.clear()
     errors = {}
 
     x_span = X_LIM_R - X_LIM_L
@@ -3289,6 +3293,7 @@ def _plot_function_impl(fig=None):
         if key in _marked_points:
             return False
         _marked_points.add(key)
+        LAST_POINTS.setdefault(key, {'x': float(px), 'y': float(py), 'label': None})
         opts = dict(markersize=4, zorder=9)
         opts.update(kw)
         ax.plot(px, py, 'o', color=color, **opts)
@@ -3306,6 +3311,7 @@ def _plot_function_impl(fig=None):
         if key in _annotated_points:
             return None
         _annotated_points.add(key)
+        LAST_POINTS.setdefault(key, {'x': float(px), 'y': float(py), 'label': None})['label'] = str(label)
 
         near_y = abs(px - y_axis_x) < x_span * 0.12
         BBOX   = dict(boxstyle='round,pad=0.3', fc='none',
