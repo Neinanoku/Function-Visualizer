@@ -302,7 +302,8 @@ class MathModel:
             return
         if len(t) == 1 and t in '0123456789.':
             self._insert_node(Atom('num', t))
-        elif t in ('x', 'y'):
+        elif t in ('x', 'y') or (len(t) == 1 and 'a' <= t <= 'z' and t != 'e'):
+            # x, y и однобуквенные параметры (a, b, k…) — переменные; e — константа
             self._insert_node(Atom('var', t))
         elif t in OP_TOKENS:
             self._insert_node(Atom('op', OP_TOKENS[t]))
@@ -869,7 +870,14 @@ def _split_ident(word):
                 i += len(name)
                 break
         else:
-            raise ValueError("unknown identifier %r" % word)
+            # Однобуквенный параметр (a, b, k…): ровно одна неизвестная буква,
+            # за которой идёт известное имя или конец слова. «foo» — ошибка.
+            nxt_known = (i + 1 >= len(w)) or any(w.startswith(n, i + 1) for n in _NAMES_LONGEST)
+            if 'a' <= w[i] <= 'z' and w[i] != 'e' and nxt_known:
+                out.append(w[i])
+                i += 1
+            else:
+                raise ValueError("unknown identifier %r" % word)
     return out
 
 
@@ -1041,8 +1049,8 @@ class _Parser:
         if tt == 'id':
             self.next()
             name = _NAME_ALIASES.get(tv, tv)
-            if name in ('x', 'y'):
-                return [Atom('var', name)]
+            if name in ('x', 'y') or (len(name) == 1 and 'a' <= name <= 'z' and name != 'e'):
+                return [Atom('var', name)]          # x, y и однобуквенные параметры
             if name == 'pi':
                 return [Atom('const', 'π')]
             if name == 'e':

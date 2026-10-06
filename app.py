@@ -241,6 +241,11 @@ STRINGS_HE = {
     "f1 / f2 - function indices (0, 1, …) or 'x' for the X axis":
         "f1 / f2 - אינדקסי פונקציות (0, 1, …) או 'x' עבור ציר X",
     "Graph Labels": "תוויות על הגרף",
+    "Parameters": "פרמטרים",
+    "parameter a - a slider appears in the Parameters card": "פרמטר a - מחוון יופיע בכרטיס הפרמטרים",
+    "parameter b - a slider appears in the Parameters card": "פרמטר b - מחוון יופיע בכרטיס הפרמטרים",
+    "parameter c - a slider appears in the Parameters card": "פרמטר c - מחוון יופיע בכרטיס הפרמטרים",
+    "parameter k - a slider appears in the Parameters card": "פרמטר k - מחוון יופיע בכרטיס הפרמטרים",
     "Double-click empty space on the graph to add a label. Drag to move, scroll to rotate, "
     "right-click for options. Point labels can be dragged too.":
         "לחיצה כפולה על מקום ריק בגרף מוסיפה תווית. גרירה - הזזה, גלגלת - סיבוב, "
@@ -353,6 +358,11 @@ STRINGS_RU = {
     "f1 / f2 - function indices (0, 1, …) or 'x' for the X axis":
         "f1 / f2 - номера функций (0, 1, …) или 'x' для оси X",
     "Graph Labels": "Подписи на графике",
+    "Parameters": "Параметры",
+    "parameter a - a slider appears in the Parameters card": "параметр a - ползунок появится в карточке «Параметры»",
+    "parameter b - a slider appears in the Parameters card": "параметр b - ползунок появится в карточке «Параметры»",
+    "parameter c - a slider appears in the Parameters card": "параметр c - ползунок появится в карточке «Параметры»",
+    "parameter k - a slider appears in the Parameters card": "параметр k - ползунок появится в карточке «Параметры»",
     "Double-click empty space on the graph to add a label. Drag to move, scroll to rotate, "
     "right-click for options. Point labels can be dragged too.":
         "Двойной щелчок по пустому месту графика добавляет подпись. Перетаскивание - перемещение, "
@@ -848,6 +858,10 @@ class Keypad(tk.Frame):
          ("√", "sqrt", "square root"), ("ⁿ√", "root", "n-th root")],
         [("|a|", "abs", "absolute value"), ("π", "pi", "the number π"),
          ("e", "e", "the number e"), ("a/b", "/", "fraction")],
+        [("a", "a", "parameter a - a slider appears in the Parameters card"),
+         ("b", "b", "parameter b - a slider appears in the Parameters card"),
+         ("c", "c", "parameter c - a slider appears in the Parameters card"),
+         ("k", "k", "parameter k - a slider appears in the Parameters card")],
         [("sin", "sin", "sine"), ("cos", "cos", "cosine"), ("tan", "tan", "tangent"),
          ("cot", "cot", "cotangent")],
         [("ln", "ln", "natural logarithm"), ("log", "log", "common (base-10) logarithm"),
@@ -894,12 +908,12 @@ class Keypad(tk.Frame):
     def _build_left(self):
         for w in self._left.winfo_children():
             w.destroy()
-        rows = list(self.LEFT_BASIC[:3])
+        rows = list(self.LEFT_BASIC[:4])          # x y a² aᵇ / ( ) √ ⁿ√ / |a| π e a/b / a b c k
         if self._page == 0:
-            rows += self.LEFT_BASIC[3:5]
+            rows += self.LEFT_BASIC[4:6]           # sin cos tan cot / ln log logₐ eˣ
         else:
-            rows += self.LEFT_EXTRA
-        rows += [self.LEFT_BASIC[5]]
+            rows += self.LEFT_EXTRA                # arcsin … / csc …
+        rows += [self.LEFT_BASIC[6]]              # fn ↑ ↓
         self._build_block(self._left, rows, numeric=False)
 
     def _build_block(self, parent, rows, numeric):
@@ -1124,6 +1138,91 @@ class FuncRow:
     def destroy(self):
         self.frame.destroy()
         self.frame2.destroy()
+
+
+# ═════════════════════════════════════════════════════════════
+#  СТРОКА ПАРАМЕТРА (ползунок)
+# ═════════════════════════════════════════════════════════════
+
+class ParamRow:
+    """
+    Ползунок параметра a, b, c, k…: «a = 1.50  [min] ══●══ [max]».
+    Появляется, когда буква встречается в формуле; значение подставляется
+    в движок при каждой перерисовке (fv.PARAMS).
+    """
+    SLIDER_DELAY_MS = 60
+
+    def __init__(self, parent, name, on_change):
+        self.name = name
+        self.on_change = on_change
+        self.frame = tk.Frame(parent, bg=PANEL_BG)
+        self.frame.pack(fill="x", padx=4, pady=2)
+        S = side()
+        tk.Label(self.frame, text=f"{name} =", bg=PANEL_BG, fg=TEXT,
+                 font=(UI_FONT, 11, "bold italic"), width=3, anchor="e").pack(side=S, padx=(6, 2))
+        self.value_var = tk.DoubleVar(value=1.0)
+        self._val_label = tk.Label(self.frame, text="1", width=6, bg=ENTRY_BG, fg=TEXT,
+                                   font=(UI_FONT, 10), relief="flat",
+                                   highlightthickness=1, highlightbackground=BORDER)
+        self._val_label.pack(side=S, padx=(0, 6))
+        self.min_e = live_entry(self.frame, 4, "-5", self._range_changed)
+        self.min_e.pack(side=S, padx=(2, 2))
+        self.scale = tk.Scale(self.frame, from_=-5, to=5, orient="horizontal",
+                              variable=self.value_var, length=_px(170), resolution=0.02,
+                              bg=CARD_BG, fg=TEXT, troughcolor=ACCENT, activebackground=BTN_DEL,
+                              highlightthickness=0, bd=0, sliderrelief="flat", showvalue=False,
+                              command=self._slid, font=(UI_FONT, 7))
+        self.scale.pack(side=S)
+        self.max_e = live_entry(self.frame, 4, "5", self._range_changed)
+        self.max_e.pack(side=S, padx=(2, 2))
+        self._update_label()
+
+    @staticmethod
+    def _fmt(v):
+        s_ = f"{v:.4g}"
+        return s_ if s_ != "-0" else "0"
+
+    def _update_label(self):
+        self._val_label.config(text=self._fmt(self.get()))
+
+    def _slid(self, _v=None):
+        self._update_label()
+        self.on_change(delay=self.SLIDER_DELAY_MS)
+
+    def _range_changed(self):
+        try:
+            lo = fv.parse_number(self.min_e.get()); hi = fv.parse_number(self.max_e.get())
+            if not (math.isfinite(lo) and math.isfinite(hi)) or lo >= hi:
+                return
+        except Exception:
+            return
+        span = hi - lo
+        res = 10 ** math.floor(math.log10(span / 500.0)) if span > 0 else 0.01
+        self.scale.config(from_=lo, to=hi, resolution=res)
+        v = self.get()
+        if v < lo or v > hi:
+            self.value_var.set(max(lo, min(hi, v)))
+        self._update_label()
+        self.on_change()
+
+    def get(self):
+        try:
+            return float(self.value_var.get())
+        except Exception:
+            return 0.0
+
+    def set(self, value, lo=None, hi=None):
+        if lo is not None and hi is not None:
+            self.min_e.var.set(str(lo)); self.max_e.var.set(str(hi))
+            self._range_changed()
+        self.value_var.set(float(value))
+        self._update_label()
+
+    def to_dict(self):
+        return {"value": self.get(), "min": self.min_e.get(), "max": self.max_e.get()}
+
+    def destroy(self):
+        self.frame.destroy()
 
 
 # ═════════════════════════════════════════════════════════════
@@ -1553,9 +1652,17 @@ class App(tk.Tk):
         self.keypad = Keypad(self.func_card, self._on_key)
         self.keypad.pack(anchor=anchor_start(), padx=10, pady=(0, 8))
 
+        # ── Parameters (ползунки; карточка видна, только когда есть параметры) ──
+        self.param_card = card(p, "Parameters")
+        self.param_list = tk.Frame(self.param_card, bg=PANEL_BG)
+        self.param_list.pack(fill="x", padx=8, pady=(0, 6))
+        self.param_rows = {}                      # имя → ParamRow
+        self._param_saved = {}                    # значения из проекта для ещё не созданных строк
+
         # ── View window ──────────────────────────────────────
         lim = card(p, "View Window")
         card_pack(lim, fill="x", padx=12, pady=4)
+        self._view_card = lim
         g = tk.Frame(lim, bg=CARD_BG)
         g.pack(fill="x", padx=10, pady=(0, 10))
 
@@ -1860,6 +1967,8 @@ class App(tk.Tk):
             styles.append(r.get_linestyle())
             domains.append(r.get_domain())
 
+        params = self._sync_params(funcs)
+
         def num(entry, what):
             try:
                 return fv.parse_number(entry.get())
@@ -1886,7 +1995,41 @@ class App(tk.Tk):
             fills.append(entry)
 
         return dict(funcs=funcs, colors=colors, widths=widths, styles=styles, domains=domains,
-                    xl=xl, xr=xr, yb=yb, yt=yt, xg=xg, yg=yg, fills=fills)
+                    xl=xl, xr=xr, yb=yb, yt=yt, xg=xg, yg=yg, fills=fills, params=params)
+
+    def _sync_params(self, funcs):
+        """Строки-ползунки под найденные в формулах параметры; возвращает {имя: значение}."""
+        try:
+            names = fv.find_parameters(funcs)
+        except Exception:
+            names = []
+        for name in list(self.param_rows):
+            if name not in names:
+                self.param_rows.pop(name).destroy()
+        for name in names:
+            if name not in self.param_rows:
+                row = ParamRow(self.param_list, name, self._param_changed)
+                saved = self._param_saved.get(name)
+                if saved:
+                    try:
+                        row.set(float(saved.get("value", 1.0)), saved.get("min", "-5"), saved.get("max", "5"))
+                    except Exception:
+                        pass
+                self.param_rows[name] = row
+        # порядок строк — по алфавиту
+        for name in names:
+            self.param_rows[name].frame.pack_forget()
+        for name in names:
+            self.param_rows[name].frame.pack(fill="x", padx=4, pady=2)
+        outer = self.param_card._outer
+        if names and not outer.winfo_manager():
+            outer.pack(fill="x", padx=12, pady=4, before=self._view_card._outer)
+        elif not names and outer.winfo_manager():
+            outer.pack_forget()
+        return {name: repr(round(self.param_rows[name].get(), 6)) for name in names}
+
+    def _param_changed(self, delay=None):
+        self.schedule_redraw(delay=delay)
 
     def _apply_to_engine(self, s):
         fv.FUNCS        = s["funcs"]
@@ -1910,6 +2053,7 @@ class App(tk.Tk):
         fv.Y_HIDE = self.v_yhide.get()
         fv.FONT_SIZE = self.font_size_var.get()
         fv.FILL   = s["fills"]
+        fv.PARAMS = dict(s.get("params", {}))
 
     def _redraw(self):
         self._redraw_job = None
@@ -2012,7 +2156,9 @@ class App(tk.Tk):
             if not jobs:
                 return False
             self._batch_seq += 1
-            self._job_batches.append((self._batch_seq, jobs))
+            # Старые, ещё не начатые пачки относятся к уже не показанному кадру
+            # (например, к прежнему значению ползунка) — выбрасываем их
+            self._job_batches = [(self._batch_seq, jobs)]
             self._jobs_event.set()
         return True
 
@@ -2307,6 +2453,7 @@ class App(tk.Tk):
                 "hide_y": self.v_yhide.get(), "font_size": self.font_size_var.get(),
             },
             "fills": [f.to_dict() for f in self.fill_rows],
+            "params": {name: row.to_dict() for name, row in self.param_rows.items()},
             "free_texts": [dict(t) for t in fv.FREE_TEXTS],
             "axis_labels": fv.AXIS_LABELS,
             "annotation_offsets": [[list(k), list(v)] for k, v in fv.ANNOTATION_OFFSETS.items()],
@@ -2358,6 +2505,12 @@ class App(tk.Tk):
                 self._add_func()
             for fd in data.get("fills", []):
                 self._add_fill().from_dict(fd)
+            # Параметры: строки создаются при следующем _collect по формулам;
+            # сохранённые значения подхватываются оттуда
+            self._param_saved = dict(data.get("params", {}) or {})
+            for row in list(self.param_rows.values()):
+                row.destroy()
+            self.param_rows = {}
 
             view = data.get("view", {})
             x = view.get("x", ["-5", "5"]); y = view.get("y", ["-5", "5"])

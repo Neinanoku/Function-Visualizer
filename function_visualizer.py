@@ -626,11 +626,36 @@ def _parse_transformations():
                                        convert_xor)
 
 
-def _parse_local_dict(with_y=False):
+# ── Параметры-ползунки ────────────────────────────────────────────────
+# PARAMS: имя → значение. Одиночная буква в формуле (кроме x, y, e) — это
+# параметр: при разборе он подставляется точным числом (Rational('1.5') =
+# 3/2), поэтому точные подписи (корни, экстремумы) считаются как обычно,
+# а все кэши учитывают текущие значения через _params_key().
+PARAMS = {}
+_PARAM_NAME_RE = re.compile(r'^[a-df-wz]$')
+
+
+def is_param_name(name):
+    return bool(_PARAM_NAME_RE.match(str(name)))
+
+
+def _param_value(v):
+    from sympy import Rational
+    try:
+        return Rational(str(v).strip())
+    except Exception:
+        return sympify(float(v))
+
+
+def _params_key():
+    return tuple(sorted((str(k), str(v)) for k, v in PARAMS.items()))
+
+
+def _parse_local_dict(with_y=False, with_params=True):
     """
     Словарь имён для parse_expr: 'e' — число Эйлера, 'pi' — π, 'x' (и 'y') —
     переменные; дополнительные имена функций (русские tg/ctg, arc-формы,
-    nroot/cbrt/root).
+    nroot/cbrt/root); параметры PARAMS — их текущие значения.
     """
     from sympy import asin, acos, atan, acot, tan, cot, sinh, cosh, tanh
     d = {'e': E, 'pi': pi, 'x': _X_SYM,
@@ -642,7 +667,43 @@ def _parse_local_dict(with_y=False):
          'th': tanh, 'sgn': sign}
     if with_y:
         d['y'] = _Y_SYM
+    if with_params:
+        for k, v in PARAMS.items():
+            if is_param_name(k):
+                d[str(k)] = _param_value(v)
     return d
+
+
+def _unknown_identifiers(src, local_dict):
+    """Идентификаторы строки, неизвестные sympy и local_dict (в порядке появления)."""
+    import re as _re
+    import sympy as _sp
+    known = set(local_dict) | {'x', 'y', 'e', 'pi', 'oo', 'inf', 'lg', 'log2', 'log10'}
+    bad = []
+    for ident in _re.findall(r'[A-Za-z_][A-Za-z_0-9]*', str(src)):
+        low = ident.lower()
+        if low in known or ident in known:
+            continue
+        if hasattr(_sp, ident) or hasattr(_sp, low):
+            continue
+        if ident not in bad:
+            bad.append(ident)
+    return bad
+
+
+def find_parameters(func_strs):
+    """
+    Имена параметров (одиночные буквы, кроме x, y, e) во всех строках функций,
+    по алфавиту. Многобуквенные неизвестные имена параметрами не считаются
+    (они остаются ошибкой «unknown name»).
+    """
+    local = _parse_local_dict(with_y=True, with_params=False)
+    found = set()
+    for s_ in func_strs or []:
+        for ident in _unknown_identifiers(_preprocess_func_str(str(s_)), local):
+            if is_param_name(ident):
+                found.add(ident)
+    return sorted(found)
 
 
 def parse_exact(text):
@@ -677,18 +738,7 @@ def _unknown_names_msg(src, extra_symbols, local_dict):
     на буквы (foo → f·o·o), поэтому ищем в исходной строке целые
     идентификаторы, которых нет среди известных имён sympy / local_dict.
     """
-    import re as _re
-    import sympy as _sp
-    known = set(local_dict) | {'x', 'y', 'e', 'pi', 'oo', 'inf', 'lg', 'log2', 'log10'}
-    bad = []
-    for ident in _re.findall(r'[A-Za-z_][A-Za-z_0-9]*', str(src)):
-        low = ident.lower()
-        if low in known or ident in known:
-            continue
-        if hasattr(_sp, ident) or hasattr(_sp, low):
-            continue
-        if ident not in bad:
-            bad.append(ident)
+    bad = _unknown_identifiers(src, local_dict)
     if not bad:
         bad = sorted(str(s) for s in extra_symbols)
     return "unknown name: " + ', '.join(bad)
@@ -707,7 +757,8 @@ def build_numpy_func(func_str):
     строке: в live-режиме функция вызывается при каждой перерисовке.
     Ошибки разбора НЕ кэшируются (бросаются вызывающему).
     """
-    hit = _NUMPY_FUNC_CACHE.get(func_str)
+    cache_key = (func_str, _params_key())
+    hit = _NUMPY_FUNC_CACHE.get(cache_key)
     if hit is not None:
         return hit
     from sympy.parsing.sympy_parser import parse_expr
@@ -728,7 +779,7 @@ def build_numpy_func(func_str):
     f = lambdify(x, expr, modules=_LAMBDIFY_MODULES)
     if len(_NUMPY_FUNC_CACHE) >= _FUNC_CACHE_LIMIT:
         _NUMPY_FUNC_CACHE.clear()
-    _NUMPY_FUNC_CACHE[func_str] = (expr, expr_raw, f)
+    _NUMPY_FUNC_CACHE[cache_key] = (expr, expr_raw, f)
     return expr, expr_raw, f
 
 
@@ -741,7 +792,7 @@ def build_implicit_func(lhs_str, rhs_str):
     Возвращает (H_sympy, h), h(X, Y) работает с массивами (meshgrid).
     Результат мемоизируется по паре строк.
     """
-    key = (lhs_str, rhs_str)
+    key = (lhs_str, rhs_str, _params_key())
     hit = _IMPLICIT_FUNC_CACHE.get(key)
     if hit is not None:
         return hit
