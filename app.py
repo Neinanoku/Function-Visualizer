@@ -1650,7 +1650,7 @@ class ExportDialog(tk.Toplevel):
 
 class Probe:
     """
-    Наведение на кривую показывает точку (x, y) и наклон dy/dx с касательной
+    Наведение на кривую показывает точку (x, y) и наклон dy/dx
     (без перерисовки — blit поверх кэшированного кадра). Клик закрепляет щуп:
     он рисуется при каждом построении, следует за кривой при изменении
     формулы/параметров, его можно тянуть вдоль кривой, правая кнопка — удалить.
@@ -1792,33 +1792,12 @@ class Probe:
             txt += f"\ndy/dx = {self._fmt(k)}"
         return txt
 
-    def _tangent_xy(self, ax, idx, x, y, half_px=40):
-        k = self._slope(idx, x)
-        if k is None:
-            return None
-        trans = ax.transData
-        inv = trans.inverted()
-        p0 = trans.transform((x, y))
-        p1 = trans.transform((x + 1.0, y + k))
-        dx, dy = p1[0] - p0[0], p1[1] - p0[1]
-        n = math.hypot(dx, dy)
-        if n < 1e-9:
-            return None
-        ux, uy = dx / n * _px(half_px), dy / n * _px(half_px)
-        a = inv.transform((p0[0] - ux, p0[1] - uy))
-        b = inv.transform((p0[0] + ux, p0[1] + uy))
-        return [a[0], b[0]], [a[1], b[1]]
-
     LABEL_OFFSET = (10.0, 10.0)      # смещение окошка от точки по умолчанию (пункты)
 
     def _make_artists(self, ax, idx, x, y, color, animated, offset=None):
+        """Маркер точки и окошко с координатами и dy/dx (касательная не рисуется)."""
         fs = max(6, int(fv.FONT_SIZE))
         off = tuple(offset) if offset else self.LABEL_OFFSET
-        tan = self._tangent_xy(ax, idx, x, y)
-        tangent = ax.plot(tan[0] if tan else [x, x], tan[1] if tan else [y, y],
-                          color=color, linewidth=1.0, linestyle='--', alpha=0.8,
-                          zorder=9, animated=animated)[0]
-        tangent.set_visible(tan is not None)
         marker = ax.plot([x], [y], 'o', color=color, markersize=7, markeredgecolor=fv.plot_background(),
                          markeredgewidth=1.2, zorder=12, animated=animated)[0]
         text = ax.annotate(self._label(idx, x, y), xy=(x, y), xytext=off,
@@ -1826,18 +1805,13 @@ class Probe:
                            fontsize=fs, color=color, zorder=13, animated=animated,
                            bbox=dict(boxstyle='round,pad=0.3', fc=fv.plot_background(),
                                      ec=color, alpha=0.92, lw=0.8))
-        return marker, text, tangent
+        return marker, text
 
     def _move_artists(self, ax, artists, idx, x, y):
-        marker, text, tangent = artists
+        marker, text = artists
         marker.set_data([x], [y])
         text.xy = (x, y)
         text.set_text(self._label(idx, x, y))
-        tan = self._tangent_xy(ax, idx, x, y)
-        if tan:
-            tangent.set_data(tan[0], tan[1]); tangent.set_visible(True)
-        else:
-            tangent.set_visible(False)
 
     # ── наведение (blit) ─────────────────────────────────────
     def _on_draw(self, _event):
@@ -1929,7 +1903,7 @@ class Probe:
         if ax is None or event.x is None:
             return None
         r = _px(9)
-        for i, (pin, (marker, text, _t)) in enumerate(self._pin_artists):
+        for i, (pin, (marker, text)) in enumerate(self._pin_artists):
             try:
                 px, py = ax.transData.transform((pin['x'], pin['y']))
                 if math.hypot(px - event.x, py - event.y) <= r:
@@ -1942,7 +1916,7 @@ class Probe:
         """Индекс закреплённого щупа, по окошку которого кликнули, или None."""
         if event.x is None:
             return None
-        for pin, (marker, text, _t) in self._pin_artists:
+        for pin, (marker, text) in self._pin_artists:
             try:
                 if text.contains(event)[0]:
                     return self.pins.index(pin)
@@ -1967,7 +1941,7 @@ class Probe:
         pin = self.pins[i]
         pin['dx'] = dx0 + (event.x - x0) * k
         pin['dy'] = dy0 + (event.y - y0) * k
-        for p, (marker, text, _t) in self._pin_artists:
+        for p, (marker, text) in self._pin_artists:
             if p is pin:
                 text.set_position((pin['dx'], pin['dy']))
         self.canvas.draw_idle()
