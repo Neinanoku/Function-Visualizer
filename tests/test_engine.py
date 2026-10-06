@@ -886,6 +886,47 @@ def test_fill_area_label():
     assert not [t for t in res['ax'].texts if t.get_text().startswith("S")]
 
 
+def test_exact_readability_and_mixed_numbers():
+    """Читаемые точные формы остаются, громоздкие → десятичные (2 знака); дроби > 1 — смешанные числа."""
+    from sympy import Rational, sqrt, pi, log
+    R = fv.exact_is_readable
+    assert R(Rational(20, 3)) and R(sqrt(2) / 2) and R((1 + sqrt(13)) / 2) and R(3 * pi / 2) and R(2 * sqrt(5) / 5)
+    assert R(log(3) / log(2)) and R(1 + sqrt(2)) and R(Rational(125, 3))
+    assert not R(Rational(141, 50)) and not R(Rational(-141, 83)) and not R(Rational(18795, 11))
+    assert not R(51 * sqrt(2) / 2) and not R(5813 * sqrt(3) / 2) and not R(sqrt(105))
+    assert fv.fmt_sym(Rational(20, 3)) == "6 2/3" and fv.fmt_sym(Rational(-20, 3)) == "-6 2/3"
+    assert fv.fmt_sym_tex(Rational(20, 3)) == "6\\,\\frac{2}{3}"
+    assert fv.fmt_sym(Rational(1, 2)) == "1/2"
+    dec2 = lambda v: f"{v:.2f}".rstrip("0").rstrip(".")
+    assert fv.fmt_exact_or(2.82, Rational(141, 50), dec=dec2) == "2.82"
+    assert fv.fmt_exact_or(-36.0624, -51 * sqrt(2) / 2, dec=dec2) == "-36.06"
+    assert fv.fmt_exact_or(20 / 3, Rational(20, 3), dec=dec2) == "6 2/3"
+    assert fv.fmt_exact_or(18795 / 11, Rational(18795, 11)) == "1708.64"        # без «кратных π» по грубому допуску
+    # в подписях точек: y = 83x/50 + 141/50 → (0, 2.82) и (−1.7, 0)
+    fv.SYMBOLIC_MODE = 'compute'
+    res = draw(["83*x/50 + 141/50"], X_LIM_L=-5, X_LIM_R=5, Y_LIM_B=-5, Y_LIM_T=5, X_TAG=True, Y_TAG=True, SHOW_VALUES=True)
+    texts = [t.get_text().replace("$", "").replace("−", "-") for t in res['ax'].texts]
+    assert any("2.82" in t for t in texts) and any("-1.7" in t for t in texts), texts
+    assert not any("141" in t for t in texts), texts
+
+
+def test_hidden_function_keeps_fill():
+    """Скрытая глазком функция: кривой и подписей нет, заливка под ней остаётся, пересечения не считаются."""
+    fig = Figure(figsize=(8, 6), dpi=100)
+    FigureCanvasAgg(fig)
+    try:
+        fv.CURVE_HIDDEN = {0}
+        res = draw(["x^2", "x"], fig=fig, FILL=[(0, "x", 0.0, 1.0, 0, True, 0.02, True, "0", "1")], INTER=True)
+        ax = res['ax']
+        long_lines = [l for l in ax.lines if len(l.get_xdata()) > 1000]
+        assert len(long_lines) == 1                                 # только f1 = x нарисована
+        assert any(t.get_text().startswith(("S", "$S")) for t in ax.texts)   # площадь под скрытой x² есть
+        assert fv.LAST_CURVES[0].get('hidden') and fv.LAST_CURVES[0]['kind'] == 'func'
+        assert not any("(1, 1)" in t.get_text() for t in ax.texts)  # пересечение со скрытой не подписано
+    finally:
+        fv.CURVE_HIDDEN = set()
+
+
 def test_grid_far_from_origin():
     """Сетка и деления строятся на любом расстоянии от начала координат (баг: пропадали дальше ±12)."""
     for (xl, xr, yb, yt) in ((100, 110, 200, 210), (-18, -8, 6.5, 16.5), (1e6, 1e6 + 10, -5, 5)):

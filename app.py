@@ -1264,6 +1264,7 @@ class ParamRow:
     def __init__(self, parent, name, on_change):
         self.name = name
         self.on_change = on_change
+        self._quiet = False            # программная установка: без on_change
         self.frame = tk.Frame(parent, bg=PANEL_BG)
         self.frame.pack(fill="x", padx=4, pady=2)
         S = side()
@@ -1298,7 +1299,7 @@ class ParamRow:
         self._update_label()
         self.on_change(delay=self.SLIDER_DELAY_MS)
 
-    def _range_changed(self):
+    def _range_changed(self, notify=True):
         try:
             lo = fv.parse_number(self.min_e.get()); hi = fv.parse_number(self.max_e.get())
             if not (math.isfinite(lo) and math.isfinite(hi)) or lo >= hi:
@@ -1312,7 +1313,8 @@ class ParamRow:
         if v < lo or v > hi:
             self.value_var.set(max(lo, min(hi, v)))
         self._update_label()
-        self.on_change()
+        if notify and not self._quiet:
+            self.on_change()
 
     def get(self):
         try:
@@ -1321,11 +1323,16 @@ class ParamRow:
             return 0.0
 
     def set(self, value, lo=None, hi=None):
-        if lo is not None and hi is not None:
-            self.min_e.var.set(str(lo)); self.max_e.var.set(str(hi))
-            self._range_changed()
-        self.value_var.set(float(value))
-        self._update_label()
+        """Программная установка (проект, отмена): без вызова on_change."""
+        self._quiet = True
+        try:
+            if lo is not None and hi is not None:
+                self.min_e.var.set(str(lo)); self.max_e.var.set(str(hi))
+                self._range_changed(notify=False)
+            self.value_var.set(float(value))
+            self._update_label()
+        finally:
+            self._quiet = False
 
     def to_dict(self):
         return {"value": self.get(), "min": self.min_e.get(), "max": self.max_e.get()}
@@ -1649,6 +1656,7 @@ class Probe:
         self._hover_artists = []
         self._pin_artists = []         # [(pin, marker, text, tangent)]
         self.dragging = None           # индекс закреплённого щупа при перетаскивании
+        self.label_drag = None         # перетаскивание окошка щупа: (i, x0, y0, dx0, dy0)
         self.canvas.mpl_connect('draw_event', self._on_draw)
         self.canvas.mpl_connect('motion_notify_event', self._on_motion)
         self.canvas.mpl_connect('figure_leave_event', lambda _e: self._clear_hover())
@@ -1670,6 +1678,8 @@ class Probe:
         best = None
         for idx, meta in enumerate(fv.LAST_CURVES):
             if only_idx is not None and idx != only_idx:
+                continue
+            if meta.get('hidden'):
                 continue
             kind = meta.get('kind')
             try:
@@ -1730,6 +1740,8 @@ class Probe:
         if idx >= len(fv.LAST_CURVES):
             return None
         meta = fv.LAST_CURVES[idx]
+        if meta.get('hidden'):
+            return None
         kind = meta.get('kind')
         try:
             if kind == 'func':
@@ -1785,8 +1797,11 @@ class Probe:
         b = inv.transform((p0[0] + ux, p0[1] + uy))
         return [a[0], b[0]], [a[1], b[1]]
 
-    def _make_artists(self, ax, idx, x, y, color, animated):
+    LABEL_OFFSET = (10.0, 10.0)      # смещение окошка от точки по умолчанию (пункты)
+
+    def _make_artists(self, ax, idx, x, y, color, animated, offset=None):
         fs = max(6, int(fv.FONT_SIZE))
+        off = tuple(offset) if offset else self.LABEL_OFFSET
         tan = self._tangent_xy(ax, idx, x, y)
         tangent = ax.plot(tan[0] if tan else [x, x], tan[1] if tan else [y, y],
                           color=color, linewidth=1.0, linestyle='--', alpha=0.8,
@@ -1794,7 +1809,7 @@ class Probe:
         tangent.set_visible(tan is not None)
         marker = ax.plot([x], [y], 'o', color=color, markersize=7, markeredgecolor=fv.plot_background(),
                          markeredgewidth=1.2, zorder=12, animated=animated)[0]
-        text = ax.annotate(self._label(idx, x, y), xy=(x, y), xytext=(10, 10),
+        text = ax.annotate(self._label(idx, x, y), xy=(x, y), xytext=off,
                            textcoords='offset points', ha='left', va='bottom',
                            fontsize=fs, color=color, zorder=13, animated=animated,
                            bbox=dict(boxstyle='round,pad=0.3', fc=fv.plot_background(),
@@ -1844,6 +1859,9 @@ class Probe:
         self._blit()
 
     def _on_motion(self, event):
+        if self.label_drag is not None:
+            self._label_drag_to(event)
+            return
         if self.dragging is not None:
             self._drag_to(event)
             return
@@ -1888,7 +1906,9 @@ class Probe:
                 continue
             x, y, color = res
             pin['x'], pin['y'] = x, y
-            artists = self._make_artists(ax, pin['f'], x, y, color, animated=False)
+            artists = self._make_artists(ax, pin['f'], x, y, color, animated=False,
+                                         offset=(pin.get('dx', self.LABEL_OFFSET[0]),
+                                                 pin.get('dy', self.LABEL_OFFSET[1])))
             self._pin_artists.append((pin, artists))
 
     def hit_pin(self, event):
@@ -1905,6 +1925,45 @@ class Probe:
             except Exception:
                 continue
         return None
+
+    def hit_label(self, event):
+        """Индекс закреплённого щупа, по окошку которого кликнули, или None."""
+        if event.x is None:
+            return None
+        for pin, (marker, text, _t) in self._pin_artists:
+            try:
+                if text.contains(event)[0]:
+                    return self.pins.index(pin)
+            except Exception:
+                continue
+        return None
+
+    def begin_label_drag(self, i, event):
+        """Перетаскивание окошка щупа (как у подписи площади): смещение в пунктах."""
+        pin = self.pins[i]
+        self.label_drag = (i, event.x, event.y, pin.get('dx', self.LABEL_OFFSET[0]),
+                           pin.get('dy', self.LABEL_OFFSET[1]))
+        self._clear_hover()
+
+    def _label_drag_to(self, event):
+        if self.label_drag is None or event.x is None:
+            return
+        i, x0, y0, dx0, dy0 = self.label_drag
+        if i >= len(self.pins):
+            return
+        k = 72.0 / self.fig.dpi                   # пиксели → пункты
+        pin = self.pins[i]
+        pin['dx'] = dx0 + (event.x - x0) * k
+        pin['dy'] = dy0 + (event.y - y0) * k
+        for p, (marker, text, _t) in self._pin_artists:
+            if p is pin:
+                text.set_position((pin['dx'], pin['dy']))
+        self.canvas.draw_idle()
+
+    def end_label_drag(self):
+        was = self.label_drag is not None
+        self.label_drag = None
+        return was
 
     def begin_drag(self, i):
         self.dragging = i
@@ -1944,13 +2003,17 @@ class Probe:
             del self.pins[i]
 
     def to_list(self):
-        return [{'f': p['f'], 'x': p['x'], 'y': p.get('y', 0.0)} for p in self.pins]
+        return [{'f': p['f'], 'x': p['x'], 'y': p.get('y', 0.0),
+                 'dx': round(float(p.get('dx', self.LABEL_OFFSET[0])), 3),
+                 'dy': round(float(p.get('dy', self.LABEL_OFFSET[1])), 3)} for p in self.pins]
 
     def from_list(self, items):
         self.pins = []
         for it in items or []:
             try:
-                self.pins.append({'f': int(it['f']), 'x': float(it['x']), 'y': float(it.get('y', 0.0))})
+                self.pins.append({'f': int(it['f']), 'x': float(it['x']), 'y': float(it.get('y', 0.0)),
+                                  'dx': float(it.get('dx', self.LABEL_OFFSET[0])),
+                                  'dy': float(it.get('dy', self.LABEL_OFFSET[1]))})
             except Exception:
                 pass
 
@@ -2466,8 +2529,9 @@ class App(tk.Tk):
         self._shrink_canvas_request()
         self._preview = FramePreview(self.canvas)
         self.probe = Probe(self)
-        fv.PRESS_HIT_HOOK = lambda ev: self.probe.hit_pin(ev) is not None
-        fv.STATE_CHANGED_HOOK = self._record_state
+        fv.PRESS_HIT_HOOK = lambda ev: (self.probe.hit_pin(ev) is not None
+                                        or self.probe.hit_label(ev) is not None)
+        fv.STATE_CHANGED_HOOK = lambda: self._record_state(force=True)
 
         # Строка состояния. В иврите и русском текст собирается из фрагментов
         # (местный шрифт + UI_FONT для цифр) в status_box; self.status (Label)
@@ -2612,11 +2676,14 @@ class App(tk.Tk):
         бросает ValueError с сообщением для строки состояния.
         """
         funcs, colors, widths, styles, domains = [], [], [], [], []
+        hidden = []
         self._incomplete_rows = 0
-        for r in self.func_rows:
-            if r.is_empty() or not r.visible:
+        for idx, r in enumerate(self.func_rows):
+            if not r.visible:
+                hidden.append(idx)     # скрыта глазком: кривой нет, но заливки под ней остаются
+            if r.is_empty():
                 r.editor.set_error(None)
-                funcs.append("")       # пустая/скрытая строка = нет кривой (индексы стабильны)
+                funcs.append("")       # пустая строка = нет кривой (индексы стабильны)
             else:
                 try:
                     funcs.append(r.get())
@@ -2658,7 +2725,8 @@ class App(tk.Tk):
             fills.append(entry)
 
         return dict(funcs=funcs, colors=colors, widths=widths, styles=styles, domains=domains,
-                    xl=xl, xr=xr, yb=yb, yt=yt, xg=xg, yg=yg, fills=fills, params=params)
+                    xl=xl, xr=xr, yb=yb, yt=yt, xg=xg, yg=yg, fills=fills, params=params,
+                    hidden=hidden)
 
     def _sync_params(self, funcs):
         """Строки-ползунки под найденные в формулах параметры; возвращает {имя: значение}."""
@@ -2717,6 +2785,7 @@ class App(tk.Tk):
         fv.FONT_SIZE = self.font_size_var.get()
         fv.FILL   = s["fills"]
         fv.PARAMS = dict(s.get("params", {}))
+        fv.CURVE_HIDDEN = set(s.get("hidden", []))
 
     def _redraw(self):
         self._redraw_job = None
@@ -2727,11 +2796,17 @@ class App(tk.Tk):
             return
         self._drawing = True
         try:
-            self._record_state()
+            # Сначала _collect (он же создаёт строки-ползунки по формулам),
+            # потом снимок состояния для отмены — иначе параметры попадают в
+            # снимок на шаг позже и ломают стек повтора
             try:
                 settings = self._collect()
+                collect_error = None
             except ValueError as ex:
-                self._set_status(str(ex), ERR_COLOR)
+                settings, collect_error = None, ex
+            self._record_state()
+            if settings is None:
+                self._set_status(str(collect_error), ERR_COLOR)
                 if self._preview is not None:
                     self._preview.hide()
                 self._zoom = None
@@ -2792,9 +2867,11 @@ class App(tk.Tk):
         except Exception:
             return None
 
-    def _record_state(self):
+    def _record_state(self, force=False):
         """Запоминает шаг отмены, если состояние изменилось (вызывается перед
-        каждой перерисовкой и из движка после действий мышью)."""
+        каждой перерисовкой и из движка после действий мышью). force=True —
+        всегда отдельный шаг (законченное действие мышью: перетаскивание),
+        иначе изменения чаще UNDO_MERGE_SEC сливаются в один шаг."""
         if self._loading:
             return
         snap = self._snapshot()
@@ -2808,11 +2885,11 @@ class App(tk.Tk):
         if snap == self._state_current:
             return
         now = time.time()
-        if now - self._state_last_push > self.UNDO_MERGE_SEC:
+        if force or now - self._state_last_push > self.UNDO_MERGE_SEC:
             self._undo.append(self._state_current)
             del self._undo[:-self.UNDO_LIMIT]
             self._redo.clear()
-        self._state_last_push = now
+        self._state_last_push = 0.0 if force else now      # после действия мышью — новый шаг
         self._state_current = snap
         self._update_undo_buttons()
 
@@ -3120,6 +3197,13 @@ class App(tk.Tk):
         self._probe_candidate = None
         if event.inaxes is None:
             return
+        lab = self.probe.hit_label(event)
+        if lab is not None:
+            if event.button == 1:
+                self.probe.begin_label_drag(lab, event)     # окошко щупа двигается отдельно
+            elif event.button == 3:
+                self._probe_menu(event, lab)
+            return
         hit = self.probe.hit_pin(event)
         if hit is not None:
             if event.button == 1:
@@ -3151,8 +3235,8 @@ class App(tk.Tk):
         self.schedule_redraw(delay=1)
 
     def _on_graph_motion(self, event):
-        if self.probe.dragging is not None:
-            return                      # щуп тянется вдоль кривой (Probe._on_motion)
+        if self.probe.dragging is not None or self.probe.label_drag is not None:
+            return                      # щуп или его окошко тянутся (Probe._on_motion)
         p = self._pan
         if p is None or event.x is None:
             return
@@ -3184,6 +3268,9 @@ class App(tk.Tk):
         self.canvas.draw_idle()
 
     def _on_graph_release(self, event):
+        if self.probe.end_label_drag():
+            self._record_state(force=True)      # отдельный шаг отмены; перерисовка не нужна
+            return
         if self.probe.end_drag():
             self.schedule_redraw(delay=1)
             return
@@ -3465,7 +3552,7 @@ class App(tk.Tk):
 #  ВЫБОР ЯЗЫКА ПРИ ЗАПУСКЕ
 # ═════════════════════════════════════════════════════════════
 
-VERSION = "4.2"
+VERSION = "4.3"
 
 # (код, название на самом языке, клавиша)
 LANGUAGES = [("en", "English", "1"), ("he", "עברית", "2"), ("ru", "Русский", "3")]

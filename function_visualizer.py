@@ -457,6 +457,10 @@ _DRAW_STATE = {'pending': False}    # было ли что-то отложено
 # {'kind': 'func'|'implicit'|'vline'|'error', 'color', 'f', 'domain', 'expr',
 #  'segs' (ломаные неявной кривой), 'x' (вертикаль)} — по индексам FUNCS.
 LAST_CURVES = []
+# Индексы функций, скрытых «глазком»: кривая и её подписи не рисуются, но
+# функция остаётся доступной для заливок (штриховка под скрытой функцией
+# сохраняется); в пересечениях и щупе скрытые не участвуют.
+CURVE_HIDDEN = set()
 # Особые точки последнего построения (нули, экстремумы, пересечения, дырки…):
 # {(x, y): {'x', 'y', 'label'}} — для экспорта таблицы значений.
 LAST_POINTS = {}
@@ -2010,7 +2014,13 @@ def _fmt_sym_core(expr, tex=False):
             if abs(expr.p) > _FMT_INT_MAX or expr.q > _FMT_INT_MAX:
                 return None
             sgn = '-' if expr.p < 0 else ''
-            return sgn + _frac_txt(abs(expr.p), expr.q, tex)
+            p_abs, q = abs(expr.p), expr.q
+            if MIXED_NUMBERS and p_abs > q:
+                # Неправильная дробь → смешанное число: 20/3 → 6 2/3
+                whole, rest = divmod(p_abs, q)
+                frac = _frac_txt(rest, q, tex)
+                return sgn + (f'{whole}\\,{frac}' if tex else f'{whole} {frac}')
+            return sgn + _frac_txt(p_abs, q, tex)
         terms = Add.make_args(expr)
         if len(terms) > 3:
             return None
@@ -2068,18 +2078,93 @@ def _fmt_sym_core(expr, tex=False):
         return None
 
 
+# ── Читаемость точных форм ──────────────────────────────────────────
+# Точная запись показывается, только если она «школьная»: дробь со
+# знаменателем до READABLE_MAX_DEN, коэффициенты при корнях/π небольшие,
+# подкоренное число до READABLE_MAX_RADICAND. Иначе — десятичная запись
+# (2 знака): 141/50 → 2.82, 51√2/2 → −36.06, 18795/11 → 1708.64, но
+# 20/3 → 6 2/3, √2/2, (1+√13)/2, 3π/2 остаются точными.
+MIXED_NUMBERS = True
+READABLE_EXACT = True
+READABLE_MAX_DEN = 10          # знаменатель рациональной части
+READABLE_MAX_NUM = 9999        # числитель рациональной части (смешанное число компактно)
+READABLE_MAX_COEF = 12         # |числитель| коэффициента при √/π/e
+READABLE_MAX_COEF_DEN = 6      # знаменатель коэффициента при √/π/e
+READABLE_MAX_RADICAND = 99     # подкоренное число
+
+
+def exact_is_readable(expr):
+    """True, если точную форму стоит показывать вместо десятичной."""
+    if not READABLE_EXACT:
+        return True
+    try:
+        expr = sympify(expr)
+        if expr.free_symbols or expr.is_Float:
+            return False
+        if expr.is_Integer:
+            return True
+        if expr.is_Rational:
+            return expr.q <= READABLE_MAX_DEN and abs(expr.p) <= READABLE_MAX_NUM
+        from sympy import Pow, log as _log
+
+        def factor_ok(f):
+            if f.is_Rational:
+                return f.q <= READABLE_MAX_COEF_DEN and abs(f.p) <= READABLE_MAX_COEF
+            if f in (pi, E):
+                return True
+            if isinstance(f, Pow):
+                base, ex = f.as_base_exp()
+                if ex.is_Rational and ex.q in (2, 3) and abs(ex.p) == 1 and base.is_Integer:
+                    return 1 < abs(int(base)) <= READABLE_MAX_RADICAND
+                if base in (pi, E) and ex.is_Integer and abs(int(ex)) <= 3:
+                    return True
+                return False
+            if isinstance(f, _log):
+                return all(a.is_Integer and abs(int(a)) <= 999 for a in f.args)
+            return False
+
+        def factor_ok2(f):
+            # log(3)/log(2) = log(3)·log(2)⁻¹ → log₂(3): разрешаем степень −1 у логарифма
+            if isinstance(f, Pow):
+                base, ex = f.as_base_exp()
+                if isinstance(base, _log) and ex in (1, -1):
+                    return factor_ok(base)
+            return factor_ok(f)
+
+        terms = Add.make_args(expr)
+        if len(terms) > 3:
+            return False
+        for t in terms:
+            coef, rest = t.as_coeff_Mul()
+            if not (coef.is_Rational and coef.q <= READABLE_MAX_COEF_DEN
+                    and abs(coef.p) <= READABLE_MAX_COEF):
+                return False
+            if rest == 1:
+                continue
+            factors = Mul.make_args(rest)
+            if len(factors) > 2 or not all(factor_ok2(f) for f in factors):
+                return False
+        return True
+    except Exception:
+        return False
+
+
 def fmt_exact_or(v, c=None, dec=None, tex=False):
     """
-    Текст координаты: точная форма c (если задана, форматируется и
-    согласуется с v), иначе десятичная запись dec(v) (по умолчанию fmt_num).
-    tex=True — фрагмент mathtext.
+    Текст координаты: точная форма c (если задана, согласуется с v и
+    читаема — см. exact_is_readable), иначе десятичная запись dec(v)
+    (по умолчанию fmt_num). tex=True — фрагмент mathtext.
     """
     if c is not None:
         try:
             if _exact_matches(c, v):
-                s = fmt_sym_tex(c) if tex else fmt_sym(c)
-                if s is not None:
-                    return s
+                if exact_is_readable(c):
+                    s = fmt_sym_tex(c) if tex else fmt_sym(c)
+                    if s is not None:
+                        return s
+                # точная форма известна, но нечитаема: обычная десятичная запись,
+                # без «угадывания» кратных π по грубому допуску
+                return (dec or (lambda x: fmt_num(x, tol=1e-9, tex=tex)))(v)
         except Exception:
             pass
     return (dec or fmt_num)(v)
@@ -3485,6 +3570,21 @@ def _plot_function_impl(fig=None):
         func_data.append((None, None, color))
         curve_meta.append({'kind': 'implicit', 'color': color, 'h': h, 'H': H_sym, 'segs': segs})
 
+    def register_hidden_func(func_idx, func_str, color):
+        """Скрытая «глазком» функция: ничего не рисуем, но f и значения на
+        сетке кладём в func_data/curve_meta — для заливок под ней."""
+        if not str(func_str).strip():
+            raise SyntaxError("empty expression")
+        expr, expr_raw, f = build_numpy_func(func_str)
+        y_vals = make_y_array(f, x_vals, [], Y_LIM_B, Y_LIM_T)
+        _dom = FUNC_DOMAINS[func_idx] if func_idx < len(FUNC_DOMAINS) else (float('-inf'), float('inf'))
+        if _dom[0] != float("-inf") or _dom[1] != float("inf"):
+            y_vals = y_vals.copy()
+            y_vals[(x_vals < _dom[0]) | (x_vals > _dom[1])] = np.nan
+        func_data.append((f, y_vals, color))
+        curve_meta.append({'kind': 'func', 'hidden': True, 'color': color, 'f': f, 'domain': _dom,
+                           'expr': expr, 'x_sym': _get_x(expr), 'disc': []})
+
     def draw_func(func_idx, func_str, color, lw, ls):
         if not str(func_str).strip():
             raise SyntaxError("empty expression")      # напр. 'y=' без правой части
@@ -3623,7 +3723,11 @@ def _plot_function_impl(fig=None):
             if func_str is None or not str(func_str).strip():
                 raise _EmptyFunction()
             kind, payload = _parse_equation_input(func_str)
-            if kind == 'vline':
+            if func_idx in CURVE_HIDDEN:
+                if kind == 'func':
+                    register_hidden_func(func_idx, payload, color)
+                # скрытые вертикали/неявные кривые для заливок не нужны — пропускаем
+            elif kind == 'vline':
                 draw_vline(func_idx, func_str, payload, color, lw, ls)
             elif kind == 'implicit':
                 draw_implicit(func_idx, payload[0], payload[1], color, lw, ls)
@@ -3694,6 +3798,8 @@ def _plot_function_impl(fig=None):
         for i in range(len(curve_meta)):
             for j in range(i + 1, len(curve_meta)):
                 mi, mj = curve_meta[i], curve_meta[j]
+                if mi.get('hidden') or mj.get('hidden'):
+                    continue
                 ki, kj = mi['kind'], mj['kind']
                 pt_color = blend(mi['color'], mj['color'])
                 try:
@@ -3890,8 +3996,8 @@ def _plot_function_impl(fig=None):
         return None
 
     def area_label_text(area, exact):
-        """«S = 1/3» (точно) или «S ≈ 1.234»."""
-        if exact is not None:
+        """«S = 1/3» (точно, если форма читаема) или «S ≈ 1.234»."""
+        if exact is not None and exact_is_readable(exact):
             return math_label("S = " + fmt_sym_tex(exact)) if TEX else "S = " + fmt_sym(exact)
         txt = f"{area:.4g}"
         return math_label("S \\approx " + txt) if TEX else "S ≈ " + txt
