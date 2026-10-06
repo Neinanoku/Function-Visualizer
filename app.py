@@ -293,7 +293,7 @@ STRINGS_HE = {
     'Its boundaries are the curves (hidden ones too), the axes and the window edges.':
         'לחץ על "+ הוסף אזור", ואז לחץ בתוך האזור על הגרף. '
         'גבולותיו הם העקומות (גם המוסתרות), הצירים וקצות החלון.',
-    "point:": "נקודה:", "Pick": "בחר",
+    "Pick": "בחר",
     "Click inside the area on the graph (Esc to cancel)": "לחץ בתוך האזור על הגרף (Esc לביטול)",
     "click inside an area on the graph": "לחץ בתוך אזור על הגרף",
     "no area at this point": "אין אזור בנקודה זו", "to window edge": "עד קצה החלון",
@@ -433,7 +433,7 @@ STRINGS_RU = {
     'Its boundaries are the curves (hidden ones too), the axes and the window edges.':
         'Нажмите «+ Добавить область», затем щёлкните внутри области на графике. '
         'Её границы: кривые (в том числе скрытые), оси и края окна.',
-    "point:": "точка:", "Pick": "Указать",
+    "Pick": "Указать",
     "Click inside the area on the graph (Esc to cancel)": "Щёлкните внутри области на графике (Esc для отмены)",
     "click inside an area on the graph": "щёлкните внутри области на графике",
     "no area at this point": "в этой точке нет области", "to window edge": "до края окна",
@@ -1358,8 +1358,8 @@ class ParamRow:
 # ═════════════════════════════════════════════════════════════
 
 class FillRow:
-    """Область заливки: точка внутри неё (щелчок по графику или ввод), стиль и
-    плотность штриховки, галочка подписи площади и текущее значение площади."""
+    """Область заливки: точка внутри неё (щелчок по графику, хранится скрыто), стиль
+    и плотность штриховки, галочка подписи площади и текущее значение площади."""
     STYLES = ["45deg ////", "135deg \\\\", "Dots ...."]
 
     def __init__(self, parent, on_delete, on_change, on_pick):
@@ -1371,11 +1371,13 @@ class FillRow:
         def lbl(t, parent=None):
             make_label(parent or self.frame, t, size=9, bg=PANEL_BG).pack(side=S, padx=(4, 1))
 
-        lbl("point:")
-        self.x_e = live_entry(self.frame, 7, "", on_change); self.x_e.pack(side=S)
-        self.y_e = live_entry(self.frame, 7, "", on_change); self.y_e.pack(side=S, padx=(2, 0))
-        self.pick_btn = small_button(self.frame, "Pick", lambda: on_pick(self), bg=BTN_BLUE, padx=6, pady=1)
-        self.pick_btn.pack(side=S, padx=4)
+        # Точка внутри области хранится, но не показывается: пользователю она не нужна
+        self.x_var = tk.StringVar(value="")
+        self.y_var = tk.StringVar(value="")
+        self.x_var.trace_add("write", lambda *_: on_change())
+        self.y_var.trace_add("write", lambda *_: on_change())
+        self.pick_btn = small_button(self.frame, "Pick", lambda: on_pick(self), bg=BTN_BLUE, padx=8, pady=1)
+        self.pick_btn.pack(side=S, padx=(4, 4))
 
         lbl("style:")
         self._style_names = [he_display(T(x)) for x in self.STYLES]
@@ -1431,12 +1433,12 @@ class FillRow:
         return s if "e" not in s else repr(round(float(v), 6))
 
     def has_point(self):
-        return bool(self.x_e.get().strip() or self.y_e.get().strip())
+        return bool(self.x_var.get().strip() or self.y_var.get().strip())
 
     def set_point(self, x, y):
         """Точка внутри области (щелчок по графику)."""
-        self.x_e.var.set(self._fmt(x))
-        self.y_e.var.set(self._fmt(y))
+        self.x_var.set(self._fmt(x))
+        self.y_var.set(self._fmt(y))
 
     def set_area(self, value):
         """value: (площадь, точная форма | None, упирается ли в край окна) из движка
@@ -1463,7 +1465,7 @@ class FillRow:
             # density: 0%→step=0.05 (редко),  100%→step=0.01 (густо)
             pct = self.density_var.get() / 100.0
             density = 0.05 - pct * 0.04
-            xs, ys = self.x_e.get().strip(), self.y_e.get().strip()
+            xs, ys = self.x_var.get().strip(), self.y_var.get().strip()
             if not xs and not ys:
                 x = y = None
             else:
@@ -1476,13 +1478,13 @@ class FillRow:
             return None
 
     def to_dict(self):
-        return {"x": self.x_e.get(), "y": self.y_e.get(),
+        return {"x": self.x_var.get(), "y": self.y_var.get(),
                 "style": self.STYLES[self._style_names.index(self.style_var.get())],
                 "density": self.density_var.get(), "area": self.area_var.get()}
 
     def from_dict(self, d):
-        self.x_e.var.set(str(d.get("x", "")))
-        self.y_e.var.set(str(d.get("y", "")))
+        self.x_var.set(str(d.get("x", "")))
+        self.y_var.set(str(d.get("y", "")))
         style = str(d.get("style", ""))
         for i, name in enumerate(self.STYLES):          # по началу строки: в старых проектах
             if style.startswith(name.split()[0]):        # «135deg» записан с другими косыми
