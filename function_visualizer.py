@@ -3229,6 +3229,7 @@ REGION_MIN_CELLS = 240
 REGION_SEED_SEARCH = 3            # радиус (в ячейках) поиска свободной ячейки у точки на кривой
 REGION_ID_NONE, REGION_ID_MULTI, REGION_ID_X_AXIS, REGION_ID_Y_AXIS = -1, -2, -3, -4
 _LAST_REGION = {}                 # растр последней заливки (маска, стены) - для тестов и отладки
+_REGION_CONTEXT = {}              # стены последнего построения: подсветка области под курсором (region_at)
 
 
 def region_fill(x, y, style=0, density=0.01, area=True):
@@ -3449,6 +3450,50 @@ def _region_center(mask):
     return int(i), int(j)
 
 
+def region_at(x, y):
+    """
+    Область последнего построения, в которую попадает точка (x, y): для подсветки
+    при наведении перед щелчком. Возвращает (mask, (x0, x1, y0, y1)) или None (нет
+    построения, точка вне окна или на кривой без свободного места рядом). Стены
+    строятся при первом вызове после построения и переиспользуются, найденные
+    маски кэшируются, так что движение внутри одной области ничего не считает.
+    """
+    ctx = _REGION_CONTEXT
+    if not ctx:
+        return None
+    global X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T
+    saved = (X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T)
+    X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T = ctx['lims']        # эффективные пределы построения
+    try:
+        cache = ctx['cache']
+        if not cache:
+            nx, ny, dx, dy = ctx['grid']()
+            wall, ids, ids2 = ctx['build'](nx, ny, dx, dy)
+            cache.update(nx=nx, ny=ny, dx=dx, dy=dy, wall=wall, ids=ids, ids2=ids2)
+        dx, dy, wall = cache['dx'], cache['dy'], cache['wall']
+        if not (math.isfinite(x) and math.isfinite(y)):
+            return None
+        j0 = int(math.floor((x - X_LIM_L) / dx))
+        i0 = int(math.floor((y - Y_LIM_B) / dy))
+        seed = _region_seed_cell(wall, i0, j0)
+        if seed is None:
+            return None
+        extent = (X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T)
+        for m in ctx['masks']:
+            if m[seed]:
+                return m, extent
+        mask = _flood_region(~wall, seed[0], seed[1])
+        if mask is None:
+            return None
+        ctx['masks'].append(mask)
+        del ctx['masks'][:-8]
+        return mask, extent
+    except Exception:
+        return None
+    finally:
+        X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T = saved
+
+
 def _bisect_implicit(h, xs, ya, yb, iters=30):
     """Корни h(x, y) = 0 по y на отрезках [ya, yb] (векторно, деление пополам);
     NaN там, где знак на концах не меняется."""
@@ -3486,6 +3531,7 @@ def _plot_function_impl(fig=None):
     _disconnect_previous()
     LAST_POINTS.clear()
     LAST_FILL_AREAS.clear()
+    _REGION_CONTEXT.clear()
     errors = {}
 
     x_span = X_LIM_R - X_LIM_L
@@ -4701,6 +4747,11 @@ def _plot_function_impl(fig=None):
             # Некорректная запись заливки не должна ронять график
             logging.getLogger(__name__).debug("fill entry %r skipped", entry, exc_info=True)
             continue
+
+    # Стены этого построения для подсветки области под курсором (строятся лениво,
+    # если заливок не было; пределы запоминаем - plot_function их восстанавливает)
+    _REGION_CONTEXT.update(cache=_region_cache, grid=region_grid, build=build_region_walls,
+                           lims=(X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T), masks=[])
 
     LAST_CURVES[:] = list(curve_meta)
 

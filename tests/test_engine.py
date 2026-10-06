@@ -905,6 +905,30 @@ def test_edge_ticks_quarter_step_rule():
         fv.EXTEND_TO_CANVAS = True
 
 
+def test_region_at_for_hover_highlight():
+    """region_at(x, y): область под курсором по стенам последнего построения - та же маска
+    для точек одной области, другая для соседней, None вне окна; после нового построения
+    старые маски не используются."""
+    res = draw(["x^2", "x=1"])
+    assert fv._REGION_CONTEXT and not fv._REGION_CONTEXT['cache']      # стены строятся лениво
+    m1, extent = fv.region_at(0.5, 0.1)
+    assert extent == (-5, 5, -5, 5) and m1.dtype == bool and 0 < m1.sum() < m1.size / 50
+    m2, _ = fv.region_at(0.7, 0.2)
+    assert m2 is m1                                                     # та же область - из кэша
+    m3, _ = fv.region_at(2.0, 3.0)
+    assert m3 is not m1 and m3.sum() > m1.sum() * 10 and not (m3 & m1).any()
+    assert fv.region_at(50.0, 0.0) is None and fv.region_at(float('nan'), 0.0) is None
+    # точка точно на оси Y - ближайшая свободная ячейка
+    assert fv.region_at(0.0, 2.0) is not None
+    # штриховка по маске из region_at совпадает с областью заливки того же построения
+    draw(["x^2", "x=1"], FILL=[fv.region_fill(0.5, 0.1)])
+    m4, _ = fv.region_at(0.5, 0.1)
+    assert np.array_equal(m4, fv._LAST_REGION['mask'])
+    fv.FILL = []
+    draw([""])
+    assert fv.region_at(0.5, 0.1)[0].sum() > m3.sum()                   # без кривых - вся четверть окна
+
+
 def test_region_area_label():
     """Число площади области: точная форма для «школьных» областей (синус над осью:
     S = 2, 1/x между x = 1 и x = 2: ln 2, √x до x = 4: 5 1/3), без галочки подписи нет,

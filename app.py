@@ -1698,6 +1698,8 @@ class Probe:
         self._hover = None             # текущая точка под курсором (dict) или None
         self._hover_artists = []
         self._pin_artists = []         # [(pin, marker, text, tangent)]
+        self._region_img = None        # подсветка области под курсором (режим выбора точки)
+        self._region_mask = None
         self.dragging = None           # индекс закреплённого щупа при перетаскивании
         self.label_drag = None         # перетаскивание окошка щупа: (i, x0, y0, dx0, dy0)
         self.canvas.mpl_connect('draw_event', self._on_draw)
@@ -1857,11 +1859,61 @@ class Probe:
             return
         try:
             self.canvas.restore_region(self._bg)
+            if self._region_img is not None:
+                ax.draw_artist(self._region_img)
             for a in self._hover_artists:
                 ax.draw_artist(a)
             self.canvas.blit(self.fig.bbox)
         except Exception:
             pass
+
+    # ── подсветка области под курсором (пока ждём щелчок «+ Добавить область») ──
+    def _region_hover(self, event):
+        ax = self._ax()
+        if ax is None or event.inaxes is not ax or event.xdata is None or self.app._drawing:
+            self.clear_region()
+            return
+        res = fv.region_at(event.xdata, event.ydata)
+        if res is None:
+            self.clear_region()
+            return
+        mask, extent = res
+        if mask is self._region_mask and self._region_img is not None:
+            return                          # та же область - ничего не перерисовываем
+        self._region_mask = mask
+        rgba = np.zeros(mask.shape + (4,), dtype=np.uint8)
+        r, g, b = (int(ACCENT.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+        rgba[mask] = (r, g, b, 60)
+        try:
+            if self._region_img is None:
+                self._region_img = ax.imshow(rgba, extent=extent, origin='lower', aspect='auto',
+                                             interpolation='nearest', zorder=3.5, animated=True)
+            else:
+                self._region_img.set_data(rgba)
+                self._region_img.set_extent(extent)
+        except Exception:
+            self._region_img = None
+            return
+        if self._hover is not None:         # щуп в этом режиме не показываем
+            self._hover = None
+            for a in self._hover_artists:
+                try:
+                    a.remove()
+                except Exception:
+                    pass
+            self._hover_artists = []
+        self._blit()
+
+    def clear_region(self):
+        if self._region_img is None:
+            return
+        try:
+            self._region_img.remove()
+        except Exception:
+            pass
+        self._region_img = None
+        self._region_mask = None
+        self._blit()
 
     def _clear_hover(self):
         if self._hover is None:
@@ -1882,6 +1934,11 @@ class Probe:
         if self.dragging is not None:
             self._drag_to(event)
             return
+        if self.app._pick_row is not None:
+            self._region_hover(event)       # режим выбора точки: подсвечиваем область
+            return
+        if self._region_img is not None:
+            self.clear_region()
         if event.button is not None or self.app._pan is not None and self.app._pan.get("moved"):
             self._clear_hover()
             return
@@ -1917,6 +1974,8 @@ class Probe:
         self._pin_artists = []
         self._hover = None
         self._hover_artists = []
+        self._region_img = None             # оси построены заново, старый слой подсветки исчез
+        self._region_mask = None
         for pin in self.pins:
             res = self._resolve(pin)
             if res is None:
@@ -2692,6 +2751,7 @@ class App(tk.Tk):
             self.canvas.get_tk_widget().config(cursor="")
         except Exception:
             pass
+        self.probe.clear_region()
         if cancelled:
             self._set_status(T("Ready"))
 
