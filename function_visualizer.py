@@ -453,6 +453,14 @@ _SYM_LOCK = threading.Lock()
 _SYM_TLS = threading.local()        # force_compute=True внутри run_jobs
 _DRAW_STATE = {'pending': False}    # было ли что-то отложено в текущем построении
 
+# Кривые последнего построения (для щупа в приложении): список словарей
+# {'kind': 'func'|'implicit'|'vline'|'error', 'color', 'f', 'domain', 'expr',
+#  'segs' (ломаные неявной кривой), 'x' (вертикаль)} — по индексам FUNCS.
+LAST_CURVES = []
+# Приложение может поставить сюда функцию event → bool: «под курсором уже
+# есть свой объект» (щуп) — тогда меню свободных подписей не открывается.
+PRESS_HIT_HOOK = None
+
 
 @functools.lru_cache(maxsize=1024)
 def _ekey(expr):
@@ -2526,6 +2534,12 @@ class FreeTextManager:
         if event.inaxes != self.ax:
             return
         hit = self._find_hit(event)
+        if hit is None and PRESS_HIT_HOOK is not None:
+            try:
+                if PRESS_HIT_HOOK(event):      # под курсором объект приложения (щуп)
+                    return
+            except Exception:
+                pass
 
         if event.button == 3:   # правая кнопка — контекстное меню
             self.drag = None
@@ -2910,6 +2924,39 @@ def _disconnect_previous():
 # поведение: окно растягивается точно на холст.
 EXTEND_TO_CANVAS = True
 
+# ── Темы графика ──────────────────────────────────────────────────────
+# Цвета фона, сетки, осей и подписей; 'dark' — тёмный фон (почти чёрные
+# цвета кривых при этом автоматически светлеют, см. theme_curve_color),
+# 'print' — белый фон с более тёмной сеткой для печати.
+PLOT_THEMES = {
+    'light': {'bg': '#ffffff', 'grid': '#cccccc', 'axis': '#000000', 'asym': '#555555'},
+    'dark':  {'bg': '#1e1f24', 'grid': '#3a3d46', 'axis': '#e8e8ec', 'asym': '#9a9ca6'},
+    'print': {'bg': '#ffffff', 'grid': '#9a9a9a', 'axis': '#000000', 'asym': '#444444'},
+}
+PLOT_THEME = 'light'
+
+
+def plot_background():
+    return PLOT_THEMES.get(PLOT_THEME, PLOT_THEMES['light'])['bg']
+
+
+def theme_curve_color(color):
+    """Цвет кривой с учётом темы: на тёмном фоне очень тёмные цвета светлеют."""
+    if PLOT_THEME != 'dark':
+        return color
+    try:
+        c = str(color).lstrip('#')
+        r, g, b = (int(c[i:i + 2], 16) for i in (0, 2, 4))
+        lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+        if lum < 0.25:
+            k = (0.25 - lum) / 0.25
+            r = int(r + (235 - r) * k); g = int(g + (235 - g) * k); b = int(b + (235 - b) * k)
+            return f'#{r:02x}{g:02x}{b:02x}'
+    except Exception:
+        pass
+    return color
+
+
 # Поля вокруг области построения, в логических пикселях экрана: сетка, оси
 # и графики отступают от краёв холста на это расстояние, а названия осей
 # «x» и «y» стоят в полях за концами стрелок.
@@ -3001,6 +3048,36 @@ def plot_function(fig=None):
         X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T = saved
 
 
+def _contour_segments(cs):
+    """Ломаные (массивы N×2) линии уровня 0 из ContourSet — для щупа."""
+    segs = []
+    try:
+        from matplotlib.path import Path as _Path
+        for path in cs.get_paths():
+            verts, codes = path.vertices, path.codes
+            if codes is None:
+                if len(verts) > 1:
+                    segs.append(np.asarray(verts, dtype=float))
+                continue
+            cur = []
+            for v, c in zip(verts, codes):
+                if c == _Path.MOVETO:
+                    if len(cur) > 1:
+                        segs.append(np.asarray(cur, dtype=float))
+                    cur = [v]
+                elif c == _Path.LINETO:
+                    cur.append(v)
+            if len(cur) > 1:
+                segs.append(np.asarray(cur, dtype=float))
+        return segs
+    except Exception:
+        pass
+    try:
+        return [np.asarray(sg, dtype=float) for sg in cs.allsegs[0] if len(sg) > 1]
+    except Exception:
+        return []
+
+
 def _plot_function_impl(fig=None):
     global CURVE_WIDTHS, CURVE_STYLES, CURVE_COLORS
     global _active_free_text_manager, _active_axis_label_manager
@@ -3012,10 +3089,11 @@ def _plot_function_impl(fig=None):
     x_span = X_LIM_R - X_LIM_L
     y_span = Y_LIM_T - Y_LIM_B
 
-    ASYM_COLOR   = "#555555"
-    GRID_COLOR   = "#cccccc"
-    LABEL_COLOR  = "#000000"
-    FIG_BG       = "white"
+    _th = PLOT_THEMES.get(PLOT_THEME, PLOT_THEMES['light'])
+    ASYM_COLOR   = _th['asym']
+    GRID_COLOR   = _th['grid']
+    LABEL_COLOR  = _th['axis']
+    FIG_BG       = _th['bg']
 
     _scale_geom = math.sqrt(abs(x_span * y_span))  # оставляем для совместимости
     _FS       = max(4, min(24, FONT_SIZE))     # зажимаем в разумные пределы
@@ -3345,9 +3423,10 @@ def _plot_function_impl(fig=None):
         # Рисуем линию уровня 0 => кривую F−G=0
         # linestyles matplotlib ожидает 'solid'/'dashed'/'dotted'
         ls_map = {'-': 'solid', '--': 'dashed', ':': 'dotted', '-.': 'dashdot'}
-        ax.contour(X, Y, Z, levels=[0], colors=[color],
-                   linewidths=lw, linestyles=[ls_map.get(ls, 'solid')],
-                   zorder=5)
+        cs = ax.contour(X, Y, Z, levels=[0], colors=[color],
+                        linewidths=lw, linestyles=[ls_map.get(ls, 'solid')],
+                        zorder=5)
+        segs = _contour_segments(cs)
 
         # ── Пересечения неявной кривой с осями ──────────
         # Ось X: корни H(x, 0)=0 -> точки (x, 0)
@@ -3373,7 +3452,7 @@ def _plot_function_impl(fig=None):
                     annotate_point(0.0, yr, pt_label('0', coord(yr, ye)),
                                    above=True, color=color, side='right')
         func_data.append((None, None, color))
-        curve_meta.append({'kind': 'implicit', 'color': color, 'h': h, 'H': H_sym})
+        curve_meta.append({'kind': 'implicit', 'color': color, 'h': h, 'H': H_sym, 'segs': segs})
 
     def draw_func(func_idx, func_str, color, lw, ls):
         if not str(func_str).strip():
@@ -3505,7 +3584,7 @@ def _plot_function_impl(fig=None):
                                side=choose_side(y_axis_x, y_intercept, f))
 
     for func_idx, func_str in enumerate(FUNCS):
-        color = CURVE_COLORS[func_idx % len(CURVE_COLORS)]
+        color = theme_curve_color(CURVE_COLORS[func_idx % len(CURVE_COLORS)])
         lw = CURVE_WIDTHS[func_idx] if func_idx < len(CURVE_WIDTHS) else 1.8
         ls = CURVE_STYLES[func_idx] if func_idx < len(CURVE_STYLES) else "-"
         n_before = len(func_data)
@@ -3939,6 +4018,8 @@ def _plot_function_impl(fig=None):
             # Некорректная запись заливки не должна ронять график
             logging.getLogger(__name__).debug("fill entry %r skipped", fill_entry, exc_info=True)
             continue
+
+    LAST_CURVES[:] = list(curve_meta)
 
     _active_free_text_manager = FreeTextManager(fig, ax, font_size=_FS)
 

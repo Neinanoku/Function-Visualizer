@@ -24,6 +24,7 @@ import time
 import queue
 import threading
 import collections
+import numpy as np
 import traceback
 import tkinter as tk
 from tkinter import messagebox, filedialog, colorchooser
@@ -251,6 +252,10 @@ STRINGS_HE = {
         "לחיצה כפולה על מקום ריק בגרף מוסיפה תווית. גרירה - הזזה, גלגלת - סיבוב, "
         "לחיצה ימנית - אפשרויות. גם תוויות נקודות ניתנות לגרירה.",
     "Clear all labels": "נקה את כל התוויות",
+    "Hover a curve to read a point; click to pin it, drag the pin along the curve, "
+    "right-click to delete it.":
+        "ריחוף מעל עקומה מציג נקודה; לחיצה מקבעת אותה, גרירה מזיזה לאורך העקומה, "
+        "לחיצה ימנית מוחקת.",
     "  Save image…": "שמור תמונה…", "Reset view": "איפוס תצוגה",
     "Save project": "שמור פרויקט", "Open project": "פתח פרויקט",
     # строки функции / заливки
@@ -369,6 +374,10 @@ STRINGS_RU = {
         "Двойной щелчок по пустому месту графика добавляет подпись. Перетаскивание - перемещение, "
         "колесо - поворот, правая кнопка - меню. Подписи точек тоже можно перетаскивать.",
     "Clear all labels": "Удалить все подписи",
+    "Hover a curve to read a point; click to pin it, drag the pin along the curve, "
+    "right-click to delete it.":
+        "Наведите на кривую, чтобы увидеть точку; щелчок закрепляет её, перетаскивание двигает "
+        "вдоль кривой, правая кнопка удаляет.",
     "  Save image…": "  Сохранить картинку…", "Reset view": "Сбросить вид",
     "Save project": "Сохранить проект", "Open project": "Открыть проект",
     # строки функции / заливки
@@ -1363,6 +1372,336 @@ class FillRow:
 
 
 # ═════════════════════════════════════════════════════════════
+#  ЩУП: точка на кривой под курсором, закреплённые точки
+# ═════════════════════════════════════════════════════════════
+
+class Probe:
+    """
+    Наведение на кривую показывает точку (x, y) и наклон dy/dx с касательной
+    (без перерисовки — blit поверх кэшированного кадра). Клик закрепляет щуп:
+    он рисуется при каждом построении, следует за кривой при изменении
+    формулы/параметров, его можно тянуть вдоль кривой, правая кнопка — удалить.
+    """
+    RADIUS = 10           # логических px до кривой
+    SAMPLES = 41
+
+    def __init__(self, app):
+        self.app = app
+        self.canvas = app.canvas
+        self.fig = app.fig
+        self.pins = []                 # [{'f': idx, 'x': float, 'y': float}]
+        self._bg = None
+        self._hover = None             # текущая точка под курсором (dict) или None
+        self._hover_artists = []
+        self._pin_artists = []         # [(pin, marker, text, tangent)]
+        self.dragging = None           # индекс закреплённого щупа при перетаскивании
+        self.canvas.mpl_connect('draw_event', self._on_draw)
+        self.canvas.mpl_connect('motion_notify_event', self._on_motion)
+        self.canvas.mpl_connect('figure_leave_event', lambda _e: self._clear_hover())
+
+    # ── поиск ближайшей точки кривой ─────────────────────────
+    def _ax(self):
+        return self.fig.axes[0] if self.fig.axes else None
+
+    def nearest(self, event, only_idx=None):
+        """Ближайшая к курсору точка кривой (в пределах RADIUS px) или None."""
+        ax = self._ax()
+        if ax is None or event.inaxes is not ax or event.xdata is None or event.x is None:
+            return None
+        r = _px(self.RADIUS)
+        trans = ax.transData
+        inv = trans.inverted()
+        x0 = inv.transform((event.x - r, event.y))[0]
+        x1 = inv.transform((event.x + r, event.y))[0]
+        best = None
+        for idx, meta in enumerate(fv.LAST_CURVES):
+            if only_idx is not None and idx != only_idx:
+                continue
+            kind = meta.get('kind')
+            try:
+                if kind == 'func':
+                    lo, hi = meta.get('domain', (float('-inf'), float('inf')))
+                    a, b = max(x0, lo), min(x1, hi)
+                    if not (a <= b):
+                        continue
+                    xs = np.linspace(a, b, self.SAMPLES)
+                    ys = fv._eval_array(meta['f'], xs)
+                    ok = np.isfinite(ys)
+                    if not ok.any():
+                        continue
+                    xs, ys = xs[ok], ys[ok]
+                    pts = trans.transform(np.column_stack([xs, ys]))
+                    d = np.hypot(pts[:, 0] - event.x, pts[:, 1] - event.y)
+                    j = int(np.argmin(d))
+                    cand = (float(d[j]), idx, float(xs[j]), float(ys[j]))
+                elif kind == 'implicit':
+                    cand = None
+                    for seg in meta.get('segs', []):
+                        pts = trans.transform(seg)
+                        d = np.hypot(pts[:, 0] - event.x, pts[:, 1] - event.y)
+                        j = int(np.argmin(d))
+                        if cand is None or d[j] < cand[0]:
+                            cand = (float(d[j]), idx, float(seg[j, 0]), float(seg[j, 1]))
+                    if cand is None:
+                        continue
+                elif kind == 'vline':
+                    cx = float(meta['x'])
+                    px = trans.transform((cx, event.ydata))[0]
+                    cand = (abs(px - event.x), idx, cx, float(event.ydata))
+                else:
+                    continue
+            except Exception:
+                continue
+            if cand[0] <= r and (best is None or cand[0] < best[0]):
+                best = cand
+        if best is None:
+            return None
+        d, idx, x, y = best
+        return {'f': idx, 'x': x, 'y': y, 'kind': fv.LAST_CURVES[idx].get('kind'),
+                'color': fv.LAST_CURVES[idx].get('color', '#000000')}
+
+    def _slope(self, idx, x):
+        meta = fv.LAST_CURVES[idx] if idx < len(fv.LAST_CURVES) else None
+        if not meta or meta.get('kind') != 'func':
+            return None
+        h = 1e-4 * max(1.0, abs(x))
+        ys = fv._eval_array(meta['f'], np.array([x - h, x + h]))
+        if not np.all(np.isfinite(ys)):
+            return None
+        return float((ys[1] - ys[0]) / (2 * h))
+
+    def _resolve(self, pin):
+        """Текущая точка закреплённого щупа по актуальной кривой (следует за формулой)."""
+        idx = pin['f']
+        if idx >= len(fv.LAST_CURVES):
+            return None
+        meta = fv.LAST_CURVES[idx]
+        kind = meta.get('kind')
+        try:
+            if kind == 'func':
+                lo, hi = meta.get('domain', (float('-inf'), float('inf')))
+                x = min(max(float(pin['x']), lo), hi)
+                y = float(fv._eval_array(meta['f'], np.array([x]))[0])
+                if not math.isfinite(y):
+                    return None
+                return x, y, meta.get('color', '#000000')
+            if kind == 'implicit':
+                best = None
+                for seg in meta.get('segs', []):
+                    d = np.hypot(seg[:, 0] - pin['x'], seg[:, 1] - pin.get('y', 0.0))
+                    j = int(np.argmin(d))
+                    if best is None or d[j] < best[0]:
+                        best = (d[j], float(seg[j, 0]), float(seg[j, 1]))
+                if best is None:
+                    return None
+                return best[1], best[2], meta.get('color', '#000000')
+            if kind == 'vline':
+                return float(meta['x']), float(pin.get('y', 0.0)), meta.get('color', '#000000')
+        except Exception:
+            return None
+        return None
+
+    # ── текст и артисты ──────────────────────────────────────
+    @staticmethod
+    def _fmt(v):
+        t = f"{v:.4g}"
+        return "0" if t == "-0" else t.replace("-", "\u2212")
+
+    def _label(self, idx, x, y):
+        txt = f"({self._fmt(x)}, {self._fmt(y)})"
+        k = self._slope(idx, x)
+        if k is not None:
+            txt += f"\ndy/dx = {self._fmt(k)}"
+        return txt
+
+    def _tangent_xy(self, ax, idx, x, y, half_px=40):
+        k = self._slope(idx, x)
+        if k is None:
+            return None
+        trans = ax.transData
+        inv = trans.inverted()
+        p0 = trans.transform((x, y))
+        p1 = trans.transform((x + 1.0, y + k))
+        dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+        n = math.hypot(dx, dy)
+        if n < 1e-9:
+            return None
+        ux, uy = dx / n * _px(half_px), dy / n * _px(half_px)
+        a = inv.transform((p0[0] - ux, p0[1] - uy))
+        b = inv.transform((p0[0] + ux, p0[1] + uy))
+        return [a[0], b[0]], [a[1], b[1]]
+
+    def _make_artists(self, ax, idx, x, y, color, animated):
+        fs = max(6, int(fv.FONT_SIZE))
+        tan = self._tangent_xy(ax, idx, x, y)
+        tangent = ax.plot(tan[0] if tan else [x, x], tan[1] if tan else [y, y],
+                          color=color, linewidth=1.0, linestyle='--', alpha=0.8,
+                          zorder=9, animated=animated)[0]
+        tangent.set_visible(tan is not None)
+        marker = ax.plot([x], [y], 'o', color=color, markersize=7, markeredgecolor='white',
+                         markeredgewidth=1.2, zorder=12, animated=animated)[0]
+        text = ax.annotate(self._label(idx, x, y), xy=(x, y), xytext=(10, 10),
+                           textcoords='offset points', ha='left', va='bottom',
+                           fontsize=fs, color=color, zorder=13, animated=animated,
+                           bbox=dict(boxstyle='round,pad=0.3', fc=fv.plot_background(),
+                                     ec=color, alpha=0.92, lw=0.8))
+        return marker, text, tangent
+
+    def _move_artists(self, ax, artists, idx, x, y):
+        marker, text, tangent = artists
+        marker.set_data([x], [y])
+        text.xy = (x, y)
+        text.set_text(self._label(idx, x, y))
+        tan = self._tangent_xy(ax, idx, x, y)
+        if tan:
+            tangent.set_data(tan[0], tan[1]); tangent.set_visible(True)
+        else:
+            tangent.set_visible(False)
+
+    # ── наведение (blit) ─────────────────────────────────────
+    def _on_draw(self, _event):
+        try:
+            self._bg = self.canvas.copy_from_bbox(self.fig.bbox)
+        except Exception:
+            self._bg = None
+
+    def _blit(self):
+        ax = self._ax()
+        if self._bg is None or ax is None:
+            return
+        try:
+            self.canvas.restore_region(self._bg)
+            for a in self._hover_artists:
+                ax.draw_artist(a)
+            self.canvas.blit(self.fig.bbox)
+        except Exception:
+            pass
+
+    def _clear_hover(self):
+        if self._hover is None:
+            return
+        self._hover = None
+        for a in self._hover_artists:
+            try:
+                a.remove()
+            except Exception:
+                pass
+        self._hover_artists = []
+        self._blit()
+
+    def _on_motion(self, event):
+        if self.dragging is not None:
+            self._drag_to(event)
+            return
+        if event.button is not None or self.app._pan is not None and self.app._pan.get("moved"):
+            self._clear_hover()
+            return
+        if self.app._drawing:
+            return
+        pt = self.nearest(event)
+        if pt is None:
+            self._clear_hover()
+            return
+        ax = self._ax()
+        if self._hover is None or self._hover['f'] != pt['f']:
+            for a in self._hover_artists:
+                try:
+                    a.remove()
+                except Exception:
+                    pass
+            self._hover_artists = list(self._make_artists(ax, pt['f'], pt['x'], pt['y'],
+                                                          pt['color'], animated=True))
+        else:
+            self._move_artists(ax, self._hover_artists, pt['f'], pt['x'], pt['y'])
+        self._hover = pt
+        self._blit()
+
+    def current_hover(self):
+        return dict(self._hover) if self._hover else None
+
+    # ── закреплённые щупы ────────────────────────────────────
+    def add_pin(self, pt):
+        self.pins.append({'f': int(pt['f']), 'x': float(pt['x']), 'y': float(pt['y'])})
+
+    def draw_pins(self, ax):
+        """Рисует закреплённые щупы на свежепостроенных осях (вызывается из _redraw)."""
+        self._pin_artists = []
+        self._hover = None
+        self._hover_artists = []
+        for pin in self.pins:
+            res = self._resolve(pin)
+            if res is None:
+                continue
+            x, y, color = res
+            pin['x'], pin['y'] = x, y
+            artists = self._make_artists(ax, pin['f'], x, y, color, animated=False)
+            self._pin_artists.append((pin, artists))
+
+    def hit_pin(self, event):
+        """Индекс закреплённого щупа под курсором (по маркеру) или None."""
+        ax = self._ax()
+        if ax is None or event.x is None:
+            return None
+        r = _px(9)
+        for i, (pin, (marker, text, _t)) in enumerate(self._pin_artists):
+            try:
+                px, py = ax.transData.transform((pin['x'], pin['y']))
+                if math.hypot(px - event.x, py - event.y) <= r:
+                    return self.pins.index(pin)
+            except Exception:
+                continue
+        return None
+
+    def begin_drag(self, i):
+        self.dragging = i
+        self._clear_hover()
+
+    def _drag_to(self, event):
+        i = self.dragging
+        if i is None or i >= len(self.pins):
+            return
+        pin = self.pins[i]
+        pt = self.nearest(event, only_idx=pin['f'])
+        ax = self._ax()
+        if pt is None and ax is not None and event.xdata is not None:
+            # курсор ушёл от кривой: для явной функции берём x курсора
+            meta = fv.LAST_CURVES[pin['f']] if pin['f'] < len(fv.LAST_CURVES) else None
+            if meta and meta.get('kind') == 'func':
+                pin['x'] = float(event.xdata)
+                res = self._resolve(pin)
+                if res is None:
+                    return
+                pt = {'f': pin['f'], 'x': res[0], 'y': res[1]}
+        if pt is None:
+            return
+        pin['x'], pin['y'] = pt['x'], pt['y']
+        for p, artists in self._pin_artists:
+            if p is pin:
+                self._move_artists(ax, artists, pin['f'], pin['x'], pin['y'])
+        self.canvas.draw_idle()
+
+    def end_drag(self):
+        was = self.dragging is not None
+        self.dragging = None
+        return was
+
+    def delete_pin(self, i):
+        if 0 <= i < len(self.pins):
+            del self.pins[i]
+
+    def to_list(self):
+        return [{'f': p['f'], 'x': p['x'], 'y': p.get('y', 0.0)} for p in self.pins]
+
+    def from_list(self, items):
+        self.pins = []
+        for it in items or []:
+            try:
+                self.pins.append({'f': int(it['f']), 'x': float(it['x']), 'y': float(it.get('y', 0.0))})
+            except Exception:
+                pass
+
+
+# ═════════════════════════════════════════════════════════════
 #  МГНОВЕННЫЙ ПРЕДПРОСМОТР ПРИ ПАНОРАМИРОВАНИИ / ЗУМЕ
 # ═════════════════════════════════════════════════════════════
 
@@ -1805,9 +2144,11 @@ class App(tk.Tk):
         # ── Graph Labels ─────────────────────────────────────
         labels_card = card(p, "Graph Labels")
         card_pack(labels_card, fill="x", padx=12, pady=4)
-        hint = T("Double-click empty space on the graph to add a label. "
-                 "Drag to move, scroll to rotate, right-click for options. "
-                 "Point labels can be dragged too.")
+        hint = (T("Double-click empty space on the graph to add a label. "
+                  "Drag to move, scroll to rotate, right-click for options. "
+                  "Point labels can be dragged too.") + " " +
+                T("Hover a curve to read a point; click to pin it, drag the pin along the curve, "
+                  "right-click to delete it."))
         make_paragraph(labels_card, hint, size=8, color=SUBTEXT, bg=CARD_BG,
                        width_px=_px(LEFT_PANEL_WIDTH - 60)).pack(anchor=anchor_start(), fill="x",
                                                                  padx=10, pady=(0, 6))
@@ -1853,6 +2194,8 @@ class App(tk.Tk):
         w.bind("<Map>", lambda _e: w.after_idle(self._shrink_canvas_request), add="+")
         self._shrink_canvas_request()
         self._preview = FramePreview(self.canvas)
+        self.probe = Probe(self)
+        fv.PRESS_HIT_HOOK = lambda ev: self.probe.hit_pin(ev) is not None
 
         # Строка состояния. В иврите и русском текст собирается из фрагментов
         # (местный шрифт + UI_FONT для цифр) в status_box; self.status (Label)
@@ -1906,12 +2249,14 @@ class App(tk.Tk):
     #  Свободные подписи
     # ══════════════════════════════════════════════════════════
     def _clear_labels(self):
-        if not fv.FREE_TEXTS:
+        n = len(fv.FREE_TEXTS) + len(self.probe.pins)
+        if not n:
             return
         if not messagebox.askyesno(he_display(T("Clear all labels")),
-                                   he_display(T("Remove all {n} label(s) added on the graph?", n=len(fv.FREE_TEXTS)))):
+                                   he_display(T("Remove all {n} label(s) added on the graph?", n=n))):
             return
         fv.FREE_TEXTS.clear()
+        self.probe.pins = []
         self.schedule_redraw()
 
     # ══════════════════════════════════════════════════════════
@@ -2115,6 +2460,10 @@ class App(tk.Tk):
                 self._restore_last_good()
                 return
             self._last_good = settings
+            try:
+                self.probe.draw_pins(result['ax'])
+            except Exception:
+                log_exception("probe.draw_pins")
 
             errors = result.get('errors', {}) or {}
             for idx, r in enumerate(self.func_rows):
@@ -2389,17 +2738,42 @@ class App(tk.Tk):
 
     def _on_graph_press(self, event):
         self._pan = None
-        if event.button != 1 or event.inaxes is None or event.dblclick:
+        self._probe_candidate = None
+        if event.inaxes is None:
+            return
+        hit = self.probe.hit_pin(event)
+        if hit is not None:
+            if event.button == 1:
+                self.probe.begin_drag(hit)      # и при двойном щелчке — просто тянем
+            elif event.button == 3:
+                self._probe_menu(event, hit)
+            return
+        if event.button != 1 or event.dblclick:
             return
         if self._graph_hit_any(event):
             return
+        self._probe_candidate = self.probe.current_hover()
         lims = self._current_limits()
         if lims is None:
             return
         self._pan = {"x0": event.xdata, "y0": event.ydata, "px": event.x, "py": event.y,
                      "lims": lims, "moved": False, "ax": event.inaxes, "preview": False}
 
+    def _probe_menu(self, event, i):
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label=fv.tr("Delete"), command=lambda: self._delete_probe(i))
+        try:
+            menu.tk_popup(event.guiEvent.x_root, event.guiEvent.y_root)
+        finally:
+            menu.grab_release()
+
+    def _delete_probe(self, i):
+        self.probe.delete_pin(i)
+        self.schedule_redraw(delay=1)
+
     def _on_graph_motion(self, event):
+        if self.probe.dragging is not None:
+            return                      # щуп тянется вдоль кривой (Probe._on_motion)
         p = self._pan
         if p is None or event.x is None:
             return
@@ -2431,9 +2805,19 @@ class App(tk.Tk):
         self.canvas.draw_idle()
 
     def _on_graph_release(self, event):
+        if self.probe.end_drag():
+            self.schedule_redraw(delay=1)
+            return
         p = self._pan
         self._pan = None
+        cand = self._probe_candidate
+        self._probe_candidate = None
         if p is None or not p["moved"]:
+            if p is not None and cand is not None and event.button == 1:
+                # клик по кривой без движения — закрепить щуп
+                self.probe.add_pin(cand)
+                self.schedule_redraw(delay=1)
+                return
             if self._redraw_wanted:
                 self._redraw_wanted = False
                 self.schedule_redraw()
@@ -2485,6 +2869,7 @@ class App(tk.Tk):
             },
             "fills": [f.to_dict() for f in self.fill_rows],
             "params": {name: row.to_dict() for name, row in self.param_rows.items()},
+            "probes": self.probe.to_list(),
             "free_texts": [dict(t) for t in fv.FREE_TEXTS],
             "axis_labels": fv.AXIS_LABELS,
             "annotation_offsets": [[list(k), list(v)] for k, v in fv.ANNOTATION_OFFSETS.items()],
@@ -2558,6 +2943,7 @@ class App(tk.Tk):
             self.v_xhide.set(int(d.get("hide_x", 0))); self.v_yhide.set(int(d.get("hide_y", 0)))
             self.font_size_var.set(int(d.get("font_size", 10)))
 
+            self.probe.from_list(data.get("probes", []))
             fv.FREE_TEXTS.clear()
             for t in data.get("free_texts", []):
                 if isinstance(t, dict) and "text" in t:
