@@ -83,7 +83,7 @@ _SETTINGS = ('FUNCS', 'FUNC_DOMAINS', 'CURVE_WIDTHS', 'CURVE_STYLES', 'FILL',
              'X_LIM_L', 'X_LIM_R', 'Y_LIM_B', 'Y_LIM_T',
              'GRID', 'X_GRID', 'Y_GRID',
              'ASIMP', 'DISC', 'EXTR', 'X_TAG', 'Y_TAG', 'INTER', 'SHOW_VALUES',
-             'X_HIDE', 'Y_HIDE', 'FONT_SIZE', 'SYMBOLIC_MODE', 'MATHTEXT_LABELS')
+             'X_HIDE', 'Y_HIDE', 'AXES_HIDDEN', 'FONT_SIZE', 'SYMBOLIC_MODE', 'MATHTEXT_LABELS')
 
 
 def _reset_engine():
@@ -95,7 +95,7 @@ def _reset_engine():
     fv.X_LIM_L, fv.X_LIM_R, fv.Y_LIM_B, fv.Y_LIM_T = -5, 5, -5, 5
     fv.GRID = fv.X_GRID = fv.Y_GRID = 1
     fv.ASIMP = fv.DISC = fv.EXTR = fv.X_TAG = fv.Y_TAG = fv.INTER = fv.SHOW_VALUES = 1
-    fv.X_HIDE = fv.Y_HIDE = 0
+    fv.X_HIDE = fv.Y_HIDE = fv.AXES_HIDDEN = 0
     fv.FONT_SIZE = 10
     fv.FREE_TEXTS.clear()
     fv.SYMBOLIC_MODE = 'compute'
@@ -927,6 +927,29 @@ def test_region_at_for_hover_highlight():
     fv.FILL = []
     draw([""])
     assert fv.region_at(0.5, 0.1)[0].sum() > m3.sum()                   # без кривых - вся четверть окна
+
+
+def test_hidden_axes():
+    """AXES_HIDDEN: нет стрелок осей, делений и подписей x/y, оси не ограничивают области:
+    под y = 1 над x² с осями - половина (точка у оси Y), без осей - вся область, S = 1 1/3."""
+    fv.SYMBOLIC_MODE = 'compute'
+    res = draw(["x^2", "y=1"], FILL=[fv.region_fill(0.0, 0.5)])
+    ax = res['ax']
+    arrows = [a for a in ax.texts if getattr(a, 'arrow_patch', None) is not None and a.get_text() == ""]
+    assert len(arrows) == 2 and any(t.get_text() == "x" for t in ax.texts)
+    assert any(t.get_text() == "3" for t in ax.texts)                 # деления
+    assert fv.LAST_FILL_AREAS[0][0] == pytest.approx(2 / 3, abs=2e-3)   # ось Y делит область
+    res = draw(["x^2", "y=1"], FILL=[fv.region_fill(0.0, 0.5)], AXES_HIDDEN=1)
+    ax = res['ax']
+    arrows = [a for a in ax.texts if getattr(a, 'arrow_patch', None) is not None and a.get_text() == ""]
+    assert arrows == [] and not any(t.get_text() == "3" for t in ax.texts)
+    labels = fv._active_axis_label_manager.artists
+    assert not labels['x'].get_visible() and not labels['y'].get_visible()
+    area, exact, cut = fv.LAST_FILL_AREAS[0]
+    assert area == pytest.approx(4 / 3, abs=2e-3) and str(exact) == "4/3" and not cut
+    assert fv.region_at(0.0, 0.5)[0].sum() == pytest.approx(fv._LAST_REGION['mask'].sum())
+    assert len(curve_lines(ax)) == 2                                    # кривые и сетка остались
+    assert ax.xaxis.get_gridlines()[0].get_visible()
 
 
 def test_region_area_label():

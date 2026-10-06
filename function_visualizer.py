@@ -300,6 +300,8 @@ SHOW_VALUES = 1  # 1 — показывать координаты точек,  
 
 X_HIDE = 0    # 1 — скрыть числа делений на оси X,     0 — показывать
 Y_HIDE = 0    # 1 — скрыть числа делений на оси Y,     0 — показывать
+AXES_HIDDEN = 0   # 1 — не рисовать оси координат (стрелки, деления, подписи x/y);
+                  #     оси тогда не считаются границами областей (задачи по геометрии)
 
 FONT_SIZE = 10  # размер текста на графике (точки/подписи/деления)
 
@@ -313,7 +315,7 @@ FONT_SIZE = 10  # размер текста на графике (точки/по
 # area   - подписывать площадь на графике (число считается всегда, см. LAST_FILL_AREAS)
 #
 # Границы области: все кривые (в том числе скрытые глазком), оси координат
-# и края окна. Чтобы область не упиралась в ось, щёлкните с другой стороны оси
+# (если не скрыты, AXES_HIDDEN) и края окна. Чтобы область не упиралась в ось, щёлкните с другой стороны оси
 # ещё раз - это будет вторая запись.
 #
 # Примеры:
@@ -3625,12 +3627,13 @@ def _plot_function_impl(fig=None):
     y_axis_x = max(X_LIM_L, min(X_LIM_R, 0.0))
 
     # ── Оси со стрелками ────────────────────────
-    ax.annotate("", xy=(X_LIM_R, x_axis_y), xytext=(X_LIM_L, x_axis_y),
-                arrowprops=dict(arrowstyle='->', color=LABEL_COLOR,
-                                lw=1.2, mutation_scale=12), zorder=4)
-    ax.annotate("", xy=(y_axis_x, Y_LIM_T), xytext=(y_axis_x, Y_LIM_B),
-                arrowprops=dict(arrowstyle='->', color=LABEL_COLOR,
-                                lw=1.2, mutation_scale=12), zorder=4)
+    if not AXES_HIDDEN:
+        ax.annotate("", xy=(X_LIM_R, x_axis_y), xytext=(X_LIM_L, x_axis_y),
+                    arrowprops=dict(arrowstyle='->', color=LABEL_COLOR,
+                                    lw=1.2, mutation_scale=12), zorder=4)
+        ax.annotate("", xy=(y_axis_x, Y_LIM_T), xytext=(y_axis_x, Y_LIM_B),
+                    arrowprops=dict(arrowstyle='->', color=LABEL_COLOR,
+                                    lw=1.2, mutation_scale=12), zorder=4)
 
     # Подписи осей — в полях, за концами стрелок: «x» справа от стрелки
     # оси X, «y» над стрелкой оси Y. Не перетаскиваются.
@@ -3642,6 +3645,10 @@ def _plot_function_impl(fig=None):
                 clip_on=False, zorder=6)
     # Смещения (в пунктах) от концов стрелок.
     _axis_home_offsets = {'x': (3.0, 0.0), 'y': (0.0, 2.0)}
+    if AXES_HIDDEN:
+        # оси скрыты: подписи остаются объектами менеджера, но не рисуются и не ловят мышь
+        _axis_label_x.set_visible(False)
+        _axis_label_y.set_visible(False)
 
     # ── Деления на осях ─────────────────────────
     def make_ticks(lim_lo, lim_hi, step):
@@ -3650,14 +3657,14 @@ def _plot_function_impl(fig=None):
         return [v for v in make_ticks_for_grid(lim_lo, lim_hi, step) if abs(v) > 1e-9]
 
     for v in make_ticks(X_LIM_L, X_LIM_R, X_GRID):
-        if not X_HIDE:
+        if not X_HIDE and not AXES_HIDDEN:
             ax.plot(v, x_axis_y, '|', color=LABEL_COLOR, markersize=4, markeredgewidth=0.8, zorder=5)
             ax.annotate(tick_label(v), xy=(v, x_axis_y),
                         xytext=(0, -6), textcoords='offset points',
                         ha='center', va='top', fontsize=TICK_FS, color=LABEL_COLOR)
 
     for v in make_ticks(Y_LIM_B, Y_LIM_T, Y_GRID):
-        if not Y_HIDE:
+        if not Y_HIDE and not AXES_HIDDEN:
             ax.plot(y_axis_x, v, '_', color=LABEL_COLOR, markersize=4, markeredgewidth=0.8, zorder=5)
             ax.annotate(tick_label(v), xy=(y_axis_x, v),
                         xytext=(-6, 0), textcoords='offset points',
@@ -4284,9 +4291,9 @@ def _plot_function_impl(fig=None):
                         mark(idx, [m['x'], m['x']], [y0, y1])
             except Exception:
                 logging.getLogger(__name__).debug("region wall %d skipped", idx, exc_info=True)
-        if Y_LIM_B <= 0.0 <= Y_LIM_T:
+        if not AXES_HIDDEN and Y_LIM_B <= 0.0 <= Y_LIM_T:
             mark(REGION_ID_X_AXIS, [X_LIM_L, X_LIM_R], [0.0, 0.0])
-        if X_LIM_L <= 0.0 <= X_LIM_R:
+        if not AXES_HIDDEN and X_LIM_L <= 0.0 <= X_LIM_R:
             mark(REGION_ID_Y_AXIS, [0.0, 0.0], [Y_LIM_B, Y_LIM_T])
         return wall, ids, ids2
 
@@ -4405,9 +4412,9 @@ def _plot_function_impl(fig=None):
         # одну сторону от каждой из них, и это отсекает «чужие» ячейки у углов, где
         # граница тоньше ячейки и в near не попала (ось Y у вершины параболы)
         all_ids = [i for i, m in enumerate(curve_meta) if m.get('kind') in ('func', 'implicit', 'vline')]
-        if Y_LIM_B <= 0.0 <= Y_LIM_T:
+        if not AXES_HIDDEN and Y_LIM_B <= 0.0 <= Y_LIM_T:
             all_ids.append(REGION_ID_X_AXIS)
-        if X_LIM_L <= 0.0 <= X_LIM_R:
+        if not AXES_HIDDEN and X_LIM_L <= 0.0 <= X_LIM_R:
             all_ids.append(REGION_ID_Y_AXIS)
         Fs = {}
         for c in all_ids:

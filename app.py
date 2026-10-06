@@ -325,6 +325,7 @@ STRINGS_HE = {
     "Table saved: {path}": "הטבלה נשמרה: {path}", "Point": "נקודה", "probe": "מדידה",
     "↶ Undo": "↶ בטל", "↷ Redo": "↷ חזור",
     "Theme": "ערכת נושא", "Theme:": "ערכת נושא:", "Light": "בהיר", "Dark": "כהה", "Print": "הדפסה",
+    "Hide axes": "הסתר צירים",
     "Save project": "שמור פרויקט", "Open project": "פתח פרויקט",
     # строки функции / заливки
     "w:": "עובי:", "domain:": "תחום:", "Solid": "רציף", "Dashed": "מקווקו", "Dotted": "נקודות",
@@ -465,6 +466,7 @@ STRINGS_RU = {
     "Table saved: {path}": "Таблица сохранена: {path}", "Point": "Точка", "probe": "щуп",
     "↶ Undo": "↶ Отмена", "↷ Redo": "↷ Повтор",
     "Theme": "Тема", "Theme:": "Тема:", "Light": "Светлая", "Dark": "Тёмная", "Print": "Печать",
+    "Hide axes": "Скрыть оси",
     "Save project": "Сохранить проект", "Open project": "Открыть проект",
     # строки функции / заливки
     "w:": "толщ.:", "domain:": "ОДЗ:", "Solid": "Сплошная", "Dashed": "Штриховая", "Dotted": "Пунктир",
@@ -2549,6 +2551,7 @@ class App(tk.Tk):
         self.v_show_values = self._live_int(1)
         self.v_xhide = self._live_int(0)
         self.v_yhide = self._live_int(0)
+        self.v_hide_axes = self._live_int(0)      # скрыть оси координат (строка состояния)
 
         checks = [
             ("Asymptotes",    self.v_asimp),
@@ -2675,29 +2678,40 @@ class App(tk.Tk):
         # Строка состояния. В иврите и русском текст собирается из фрагментов
         # (местный шрифт + UI_FONT для цифр) в status_box; self.status (Label)
         # хранит полный текст (его читают тесты) и тогда не показывается.
+        # Три колонки: состояние | галочка «Скрыть оси» по центру | тема у дальнего края.
+        # Крайние колонки одинаковой ширины (uniform), поэтому галочка стоит ровно по центру.
         status_row = tk.Frame(parent, bg=APP_BG)
         status_row.pack(fill="x", padx=12, pady=(0, 6))
+        rtl = RTL()
+        c_status, c_theme = (2, 0) if rtl else (0, 2)
+        status_row.columnconfigure(c_status, weight=1, uniform="status_half")
+        status_row.columnconfigure(c_theme, weight=1, uniform="status_half")
         # Тема (светлая / тёмная / печать) — у дальнего края строки состояния
+        theme_box = tk.Frame(status_row, bg=APP_BG)
+        theme_box.grid(row=0, column=c_theme, sticky="w" if rtl else "e")
         self._theme_names = {he_display(T(name)): code for code, name in THEME_NAMES}
         cur = next((n for n, c in self._theme_names.items() if c == THEME), list(self._theme_names)[0])
         self._theme_var = tk.StringVar(value=cur)
-        om = tk.OptionMenu(status_row, self._theme_var, *self._theme_names.keys(),
+        om = tk.OptionMenu(theme_box, self._theme_var, *self._theme_names.keys(),
                            command=lambda _v: self._switch_theme(self._theme_names.get(self._theme_var.get(), "light")))
         om.config(bg=ENTRY_BG, fg=TEXT, activebackground=CARD_BG, activeforeground=TEXT,
                   relief="flat", font=ui_font(T("Light"), 8), bd=0, highlightthickness=1,
                   highlightbackground=BORDER, width=8)
         om["menu"].config(bg=ENTRY_BG, fg=TEXT, activebackground=ACCENT, font=ui_font(T("Light"), 9))
         om.pack(side=oside())
-        make_label(status_row, "Theme:", size=8, bg=APP_BG).pack(side=oside(), padx=(0, 4))
+        make_label(theme_box, "Theme:", size=8, bg=APP_BG).pack(side=oside(), padx=(0, 4))
         Tooltip(om, T("Theme"))
+        # Скрыть оси координат (задачи по геометрии): стрелки, деления, подписи x/y,
+        # точки пересечения с осями; оси перестают быть границами областей
+        make_check(status_row, "Hide axes", self.v_hide_axes, bg=APP_BG).grid(row=0, column=1, padx=12)
         self.status = tk.Label(status_row, text="", bg=APP_BG, fg=SUBTEXT,
                                font=(UI_FONT, 9), anchor="w")
         if LANG != "en":
             self.status_box = tk.Frame(status_row, bg=APP_BG)
-            self.status_box.pack(side=side(), fill="x", expand=True)
+            self.status_box.grid(row=0, column=c_status, sticky="ew")
         else:
             self.status_box = None
-            self.status.pack(side=side(), fill="x", expand=True)
+            self.status.grid(row=0, column=c_status, sticky="ew")
 
     # ── утилиты ──────────────────────────────────────────────
     def _pointer_in(self, widget):
@@ -2943,8 +2957,11 @@ class App(tk.Tk):
         fv.ASIMP  = self.v_asimp.get()
         fv.DISC   = self.v_disc.get()
         fv.EXTR   = self.v_extr.get()
-        fv.X_TAG  = self.v_xtag.get()
-        fv.Y_TAG  = self.v_ytag.get()
+        hide_axes = bool(self.v_hide_axes.get())
+        fv.AXES_HIDDEN = int(hide_axes)
+        # без осей точки пересечения с ними не нужны
+        fv.X_TAG  = self.v_xtag.get() and not hide_axes
+        fv.Y_TAG  = self.v_ytag.get() and not hide_axes
         fv.INTER  = self.v_inter.get()
         fv.SHOW_VALUES = self.v_show_values.get()
         fv.X_HIDE = self.v_xhide.get()
@@ -3605,6 +3622,7 @@ class App(tk.Tk):
                 "y_intercepts": self.v_ytag.get(), "intersections": self.v_inter.get(),
                 "show_values": self.v_show_values.get(), "hide_x": self.v_xhide.get(),
                 "hide_y": self.v_yhide.get(), "font_size": self.font_size_var.get(),
+                "hide_axes": self.v_hide_axes.get(),
             },
             "fills": [f.to_dict() for f in self.fill_rows],
             "params": {name: row.to_dict() for name, row in self.param_rows.items()},
@@ -3707,6 +3725,7 @@ class App(tk.Tk):
             self.v_ytag.set(int(d.get("y_intercepts", 1))); self.v_inter.set(int(d.get("intersections", 1)))
             self.v_show_values.set(int(d.get("show_values", 1)))
             self.v_xhide.set(int(d.get("hide_x", 0))); self.v_yhide.set(int(d.get("hide_y", 0)))
+            self.v_hide_axes.set(int(d.get("hide_axes", 0)))
             self.font_size_var.set(int(d.get("font_size", 10)))
 
             self.probe.from_list(data.get("probes", []))
@@ -3762,7 +3781,7 @@ class App(tk.Tk):
 #  ВЫБОР ЯЗЫКА ПРИ ЗАПУСКЕ
 # ═════════════════════════════════════════════════════════════
 
-VERSION = "4.4.1"
+VERSION = "4.4.2"
 
 # (код, название на самом языке, клавиша)
 LANGUAGES = [("en", "English", "1"), ("he", "עברית", "2"), ("ru", "Русский", "3")]
