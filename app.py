@@ -302,7 +302,7 @@ STRINGS_HE = {
     "parameter a - a slider appears in the Parameters card": "פרמטר a - מחוון יופיע בכרטיס הפרמטרים",
     "parameter b - a slider appears in the Parameters card": "פרמטר b - מחוון יופיע בכרטיס הפרמטרים",
     "parameter c - a slider appears in the Parameters card": "פרמטר c - מחוון יופיע בכרטיס הפרמטרים",
-    "parameter k - a slider appears in the Parameters card": "פרמטר k - מחוון יופיע בכרטיס הפרמטרים",
+    "parameter m - a slider appears in the Parameters card": "פרמטר m - מחוון יופיע בכרטיס הפרמטרים",
     "Double-click empty space on the graph to add a label. Drag to move, scroll to rotate, "
     "right-click for options. Point labels can be dragged too.":
         "לחיצה כפולה על מקום ריק בגרף מוסיפה תווית. גרירה - הזזה, גלגלת - סיבוב, "
@@ -442,7 +442,7 @@ STRINGS_RU = {
     "parameter a - a slider appears in the Parameters card": "параметр a - ползунок появится в карточке «Параметры»",
     "parameter b - a slider appears in the Parameters card": "параметр b - ползунок появится в карточке «Параметры»",
     "parameter c - a slider appears in the Parameters card": "параметр c - ползунок появится в карточке «Параметры»",
-    "parameter k - a slider appears in the Parameters card": "параметр k - ползунок появится в карточке «Параметры»",
+    "parameter m - a slider appears in the Parameters card": "параметр m - ползунок появится в карточке «Параметры»",
     "Double-click empty space on the graph to add a label. Drag to move, scroll to rotate, "
     "right-click for options. Point labels can be dragged too.":
         "Двойной щелчок по пустому месту графика добавляет подпись. Перетаскивание - перемещение, "
@@ -958,7 +958,7 @@ class Keypad(tk.Frame):
         [("a", "a", "parameter a - a slider appears in the Parameters card"),
          ("b", "b", "parameter b - a slider appears in the Parameters card"),
          ("c", "c", "parameter c - a slider appears in the Parameters card"),
-         ("k", "k", "parameter k - a slider appears in the Parameters card")],
+         ("m", "m", "parameter m - a slider appears in the Parameters card")],
         [("sin", "sin", "sine"), ("cos", "cos", "cosine"), ("tan", "tan", "tangent"),
          ("cot", "cot", "cotangent")],
         [("ln", "ln", "natural logarithm"), ("log", "log", "common (base-10) logarithm"),
@@ -1267,9 +1267,11 @@ class FuncRow:
 
 class ParamRow:
     """
-    Ползунок параметра a, b, c, k…: «a = 1.50  [min] ══●══ [max]».
+    Ползунок параметра a, b, c, m…: «a = [1.50]  [min] ══●══ [max]».
     Появляется, когда буква встречается в формуле; значение подставляется
-    в движок при каждой перерисовке (fv.PARAMS).
+    в движок при каждой перерисовке (fv.PARAMS). Число рядом с именем - поле
+    ввода: набранное значение берётся точно (без округления шагом ползунка),
+    а если оно вне диапазона, граница диапазона раздвигается.
     """
     SLIDER_DELAY_MS = 60
 
@@ -1277,16 +1279,19 @@ class ParamRow:
         self.name = name
         self.on_change = on_change
         self._quiet = False            # программная установка: без on_change
+        self._quiet_text = False       # поле значения обновляется программно
+        self._setting_scale = False    # ползунок двигаем программно
+        self._value = 1.0              # точное значение параметра
         self.frame = tk.Frame(parent, bg=PANEL_BG)
         self.frame.pack(fill="x", padx=4, pady=2)
         S = side()
         tk.Label(self.frame, text=f"{name} =", bg=PANEL_BG, fg=TEXT,
                  font=(UI_FONT, 11, "bold italic"), width=3, anchor="e").pack(side=S, padx=(6, 2))
         self.value_var = tk.DoubleVar(value=1.0)
-        self._val_label = tk.Label(self.frame, text="1", width=6, bg=ENTRY_BG, fg=TEXT,
-                                   font=(UI_FONT, 10), relief="flat",
-                                   highlightthickness=1, highlightbackground=BORDER)
-        self._val_label.pack(side=S, padx=(0, 6))
+        self.value_text = tk.StringVar(value="1")
+        self.value_text.trace_add("write", lambda *_: self._typed())
+        self._val_entry = styled_entry(self.frame, width=6, textvariable=self.value_text)
+        self._val_entry.pack(side=S, padx=(0, 6))
         self.min_e = live_entry(self.frame, 4, "-5", self._range_changed)
         self.min_e.pack(side=S, padx=(2, 2))
         self.scale = tk.Scale(self.frame, from_=-5, to=5, orient="horizontal",
@@ -1301,38 +1306,88 @@ class ParamRow:
 
     @staticmethod
     def _fmt(v):
-        s_ = f"{v:.4g}"
+        s_ = f"{v:.6g}"
         return s_ if s_ != "-0" else "0"
 
     def _update_label(self):
-        self._val_label.config(text=self._fmt(self.get()))
+        """Текст поля значения по точному значению (без вызова _typed)."""
+        self._quiet_text = True
+        try:
+            self.value_text.set(self._fmt(self._value))
+        finally:
+            self._quiet_text = False
+
+    def _move_scale(self, v):
+        """Ползунок к значению (его шаг может округлить переменную, точное значение в _value)."""
+        self._setting_scale = True
+        try:
+            self.value_var.set(float(v))
+        finally:
+            self._setting_scale = False
+
+    def _range(self):
+        # читаем переменные, а не текст полей: при программной установке текст
+        # виджета обновляется позже нашего обработчика
+        try:
+            lo = fv.parse_number(self.min_e.var.get()); hi = fv.parse_number(self.max_e.var.get())
+            if math.isfinite(lo) and math.isfinite(hi) and lo < hi:
+                return lo, hi
+        except Exception:
+            pass
+        return None
+
+    def _typed(self):
+        """Значение набрано с клавиатуры: берём точно, диапазон раздвигаем при нужде."""
+        if self._quiet_text:
+            return
+        try:
+            v = fv.parse_number(self.value_text.get())
+        except Exception:
+            return
+        if not math.isfinite(v):
+            return
+        self._value = v
+        rng = self._range()
+        if rng is not None:
+            lo, hi = rng
+            if v < lo or v > hi:
+                self._quiet, was = True, self._quiet
+                try:
+                    if v < lo:
+                        self.min_e.var.set(self._fmt(v))
+                    else:
+                        self.max_e.var.set(self._fmt(v))
+                finally:
+                    self._quiet = was
+        self._move_scale(v)
+        if not self._quiet:
+            self.on_change(delay=self.SLIDER_DELAY_MS)
 
     def _slid(self, _v=None):
+        if self._setting_scale:
+            return
+        self._value = float(self.value_var.get())
         self._update_label()
         self.on_change(delay=self.SLIDER_DELAY_MS)
 
     def _range_changed(self, notify=True):
-        try:
-            lo = fv.parse_number(self.min_e.get()); hi = fv.parse_number(self.max_e.get())
-            if not (math.isfinite(lo) and math.isfinite(hi)) or lo >= hi:
-                return
-        except Exception:
+        rng = self._range()
+        if rng is None:
             return
+        lo, hi = rng
         span = hi - lo
         res = 10 ** math.floor(math.log10(span / 500.0)) if span > 0 else 0.01
         self.scale.config(from_=lo, to=hi, resolution=res)
-        v = self.get()
+        v = self._value
         if v < lo or v > hi:
-            self.value_var.set(max(lo, min(hi, v)))
-        self._update_label()
+            self._value = max(lo, min(hi, v))
+            self._update_label()
+        self._move_scale(self._value)
         if notify and not self._quiet:
             self.on_change()
 
     def get(self):
-        try:
-            return float(self.value_var.get())
-        except Exception:
-            return 0.0
+        return float(self._value)
 
     def set(self, value, lo=None, hi=None):
         """Программная установка (проект, отмена): без вызова on_change."""
@@ -1341,7 +1396,8 @@ class ParamRow:
             if lo is not None and hi is not None:
                 self.min_e.var.set(str(lo)); self.max_e.var.set(str(hi))
                 self._range_changed(notify=False)
-            self.value_var.set(float(value))
+            self._value = float(value)
+            self._move_scale(self._value)
             self._update_label()
         finally:
             self._quiet = False
@@ -3706,7 +3762,7 @@ class App(tk.Tk):
 #  ВЫБОР ЯЗЫКА ПРИ ЗАПУСКЕ
 # ═════════════════════════════════════════════════════════════
 
-VERSION = "4.4"
+VERSION = "4.4.1"
 
 # (код, название на самом языке, клавиша)
 LANGUAGES = [("en", "English", "1"), ("he", "עברית", "2"), ("ru", "Русский", "3")]
