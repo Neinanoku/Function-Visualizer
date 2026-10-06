@@ -303,19 +303,24 @@ Y_HIDE = 0    # 1 — скрыть числа делений на оси Y,     
 
 FONT_SIZE = 10  # размер текста на графике (точки/подписи/деления)
 
-# Заливка площади
-# Формат: (f1, f2, x_от, x_до, стиль)
+# Заливка области
+# Формат записи: словарь region_fill(x, y, style, density, area) или кортеж
+# (x, y, стиль, плотность, подпись площади).
 #
-# f1  — индекс первой функции (из FUNCS)
-# f2  — индекс второй функции (из FUNCS), или "x" чтобы считать до оси X
-# x_от, x_до — диапазон по X
-# стиль — 0: штриховка 45°,  1: штриховка 135°,  2: точки
+# x, y   - точка внутри области (щелчок по графику в приложении)
+# стиль  - 0: штриховка 45°,  1: штриховка 135°,  2: точки
+# плотность - шаг штриховки в долях меньшей стороны холста (0.01 густо, 0.05 редко)
+# area   - подписывать площадь на графике (число считается всегда, см. LAST_FILL_AREAS)
+#
+# Границы области: все кривые (в том числе скрытые глазком), оси координат
+# и края окна. Чтобы область не упиралась в ось, щёлкните с другой стороны оси
+# ещё раз - это будет вторая запись.
 #
 # Примеры:
-#   (0, "x", -3, 3, 0)   — площадь между функцией 0 и осью X, штриховка 45°
-#   (0, 1, -3, 3, 1)     — площадь между функцией 0 и функцией 1, штриховка 135°
+#   {'x': 0.5, 'y': 0.1}            - область под кривой у точки (0.5, 0.1), штриховка 45°
+#   (0.5, 0.1, 1, 0.02, False)      - то же, штриховка 135°, реже, без подписи площади
 FILL = [
-    # (0, "x", -3, 3, 0),
+    # {'x': 0.5, 'y': 0.1},
 ]
 
 # ──────────────────────────────────────────────
@@ -464,8 +469,9 @@ CURVE_HIDDEN = set()
 # Особые точки последнего построения (нули, экстремумы, пересечения, дырки…):
 # {(x, y): {'x', 'y', 'label'}} — для экспорта таблицы значений.
 LAST_POINTS = {}
-# Площади заливок последнего построения: {индекс заливки: (число, точная форма или None)} —
-# считаются всегда, независимо от галочки «показывать площадь» (строка заливки показывает их).
+# Площади заливок последнего построения: {индекс заливки: (число, точная форма или None,
+# упирается ли область в край окна) или None, если области у точки нет} — считаются всегда,
+# независимо от галочки «показывать площадь» (строка заливки показывает их).
 LAST_FILL_AREAS = {}
 # Приложение может поставить сюда функцию event → bool: «под курсором уже
 # есть свой объект» (щуп) — тогда меню свободных подписей не открывается.
@@ -3208,6 +3214,270 @@ def _contour_segments(cs):
         return []
 
 
+# ══════════════════════════════════════════════════════════════
+#  ЗАЛИВКА ОБЛАСТИ ПО ЩЕЛЧКУ: растр «стен» и заливка связной области
+# ══════════════════════════════════════════════════════════════
+#
+# Область задаётся точкой внутри неё. Окно построения режется на растр
+# (≈ 1 ячейка на пиксель, не больше REGION_MAX_CELLS по стороне), все
+# видимые и скрытые кривые, оси координат и края окна становятся «стенами»,
+# а область - это 4-связная компонента свободных ячеек, содержащая точку.
+# Стены отмечаются 8-связно, поэтому 4-связная заливка через них не
+# просачивается.
+REGION_MAX_CELLS = 900
+REGION_MIN_CELLS = 240
+REGION_SEED_SEARCH = 3            # радиус (в ячейках) поиска свободной ячейки у точки на кривой
+REGION_ID_NONE, REGION_ID_MULTI, REGION_ID_X_AXIS, REGION_ID_Y_AXIS = -1, -2, -3, -4
+_LAST_REGION = {}                 # растр последней заливки (маска, стены) - для тестов и отладки
+
+
+def region_fill(x, y, style=0, density=0.01, area=True):
+    """Запись заливки для FILL: точка (x, y) внутри области, стиль штриховки
+    (0: 45°, 1: 135°, 2: точки), плотность (шаг штриховки в долях меньшей
+    стороны холста), area: подписывать площадь на графике."""
+    return {'x': x, 'y': y, 'style': int(style), 'density': float(density), 'area': bool(area)}
+
+
+def _mark_polyline(wall, ids, cid, xs, ys, x0, y0, dx, dy, ids2=None):
+    """
+    Отмечает ячейки растра, через которые проходит ломаная (NaN разрывает её).
+    Шаг выборки не больше полуячейки по каждой оси, поэтому отмеченные ячейки
+    8-связны и без пропусков. ids запоминает, какая кривая отметила ячейку,
+    ids2 - вторую кривую в той же ячейке (третья и далее → REGION_ID_MULTI).
+    """
+    ny, nx = wall.shape
+    xs = np.asarray(xs, dtype=float).ravel()
+    ys = np.asarray(ys, dtype=float).ravel()
+    n = min(xs.size, ys.size)
+    if n == 0:
+        return
+    xs, ys = xs[:n], ys[:n]
+    fin = np.isfinite(xs) & np.isfinite(ys)
+    # Далёкие точки притягиваем к окрестности растра: сегменты короткие,
+    # геометрия внутри окна не меняется, а число шагов ограничено.
+    with np.errstate(invalid='ignore'):
+        u = np.where(fin, (np.clip(xs, x0 - dx, x0 + (nx + 1) * dx) - x0) / dx, np.nan)
+        v = np.where(fin, (np.clip(ys, y0 - dy, y0 + (ny + 1) * dy) - y0) / dy, np.nan)
+    if n == 1:
+        ua, va, ub, vb = u, v, u, v
+    else:
+        ua, va, ub, vb = u[:-1], v[:-1], u[1:], v[1:]
+    ok = np.isfinite(ua) & np.isfinite(va) & np.isfinite(ub) & np.isfinite(vb)
+    if not ok.any():
+        return
+    ua, va, ub, vb = ua[ok], va[ok], ub[ok], vb[ok]
+    du, dv = ub - ua, vb - va
+    # полклетки на шаг: ровно одна клетка на шаг теряет ячейки из-за округления
+    steps = np.ceil(2.0 * np.maximum(np.abs(du), np.abs(dv))).astype(np.int64) + 1
+    steps = np.clip(steps, 1, 8 * (nx + ny))
+    total = int(steps.sum())
+    seg = np.repeat(np.arange(steps.size), steps)
+    within = np.arange(total) - np.repeat(np.cumsum(steps) - steps, steps)
+    t = within / np.maximum(steps - 1, 1)[seg]
+    U = ua[seg] + du[seg] * t
+    V = va[seg] + dv[seg] * t
+    j = np.floor(U).astype(np.int64)
+    i = np.floor(V).astype(np.int64)
+    inside = (i >= 0) & (i < ny) & (j >= 0) & (j < nx)
+    if not inside.any():
+        return
+    i, j = i[inside], j[inside]
+    wall[i, j] = True
+    cur = ids[i, j]
+    if ids2 is None:
+        ids[i, j] = np.where((cur == REGION_ID_NONE) | (cur == cid), cid, REGION_ID_MULTI)
+        return
+    other = (cur != REGION_ID_NONE) & (cur != cid)
+    cur2 = ids2[i, j]
+    ids[i, j] = np.where(cur == REGION_ID_NONE, cid, cur)
+    ids2[i, j] = np.where(other, np.where((cur2 == REGION_ID_NONE) | (cur2 == cid), cid, REGION_ID_MULTI), cur2)
+
+
+def _dilate4(a):
+    """Расширение булевой матрицы на одну ячейку по 4 соседям."""
+    out = a.copy()
+    out[1:, :] |= a[:-1, :]
+    out[:-1, :] |= a[1:, :]
+    out[:, 1:] |= a[:, :-1]
+    out[:, :-1] |= a[:, 1:]
+    return out
+
+
+def _dilate8(a):
+    """Расширение булевой матрицы на одну ячейку по 8 соседям."""
+    out = _dilate4(a)
+    out[1:, 1:] |= a[:-1, :-1]
+    out[1:, :-1] |= a[:-1, 1:]
+    out[:-1, 1:] |= a[1:, :-1]
+    out[:-1, :-1] |= a[1:, 1:]
+    return out
+
+
+def _ms_area(f0, f1, f2, f3):
+    """
+    Доля единичной клетки, где знаковая функция > 0, по значениям в углах
+    (0,0), (1,0), (1,1), (0,1) с линейной интерполяцией по рёбрам (marching
+    squares). Точна для прямых, второго порядка для гладких кривых; угол с
+    NaN → 0.5. Векторно по массивам углов.
+    """
+    F = np.stack([np.asarray(f0, float), np.asarray(f1, float),
+                  np.asarray(f2, float), np.asarray(f3, float)], axis=1)
+    K = F.shape[0]
+    bad = ~np.isfinite(F).all(axis=1)
+    F = np.where(np.isfinite(F), F, 0.0)
+    pos = F > 0
+    P = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
+    verts = np.zeros((K, 8, 2))
+    present = np.zeros((K, 8), dtype=bool)
+    for k in range(4):
+        k2 = (k + 1) % 4
+        verts[:, 2 * k] = P[k]
+        present[:, 2 * k] = pos[:, k]
+        fa, fb = F[:, k], F[:, k2]
+        cross = pos[:, k] != pos[:, k2]
+        den = np.where(fa - fb == 0, 1.0, fa - fb)
+        t = np.clip(np.where(cross, fa / den, 0.0), 0.0, 1.0)
+        verts[:, 2 * k + 1] = P[k] + t[:, None] * (P[k2] - P[k])
+        present[:, 2 * k + 1] = cross
+    rows = np.arange(K)
+    area = np.zeros(K)
+    for k in range(8):
+        nxt = np.full(K, k)
+        found = np.zeros(K, dtype=bool)
+        for d in range(1, 9):
+            c = (k + d) % 8
+            take = ~found & present[:, c]
+            nxt[take] = c
+            found |= take
+        xk, yk = verts[:, k, 0], verts[:, k, 1]
+        xn, yn = verts[rows, nxt, 0], verts[rows, nxt, 1]
+        area += np.where(present[:, k], xk * yn - xn * yk, 0.0)
+    area = np.clip(0.5 * area, 0.0, 1.0)
+    area[bad] = 0.5
+    return area
+
+
+def _runs_along_rows(a):
+    """Отрезки True в каждой строке булевой матрицы: массивы (строка, начало, конец),
+    конец не включается, порядок - по строкам слева направо."""
+    ny, nx = a.shape
+    pad = np.zeros((ny, nx + 2), dtype=np.int8)
+    pad[:, 1:-1] = a
+    d = np.diff(pad, axis=1)
+    r, s = np.nonzero(d == 1)
+    _, e = np.nonzero(d == -1)
+    return r, s, e
+
+
+def _flood_region(free, i0, j0):
+    """4-связная компонента свободных ячеек, содержащая (i0, j0): булева маска или None.
+    Обход по горизонтальным отрезкам (их тысячи, а не сотни тысяч ячеек)."""
+    ny, nx = free.shape
+    if not (0 <= i0 < ny and 0 <= j0 < nx) or not free[i0, j0]:
+        return None
+    r, s, e = _runs_along_rows(free)
+    if r.size == 0:
+        return None
+    row_first = np.searchsorted(r, np.arange(ny + 1))
+    lo, hi = int(row_first[i0]), int(row_first[i0 + 1])
+    k = lo + int(np.searchsorted(s[lo:hi], j0, side='right')) - 1
+    if k < lo or e[k] <= j0:
+        return None
+    visited = np.zeros(r.size, dtype=bool)
+    visited[k] = True
+    stack = [k]
+    while stack:
+        k = stack.pop()
+        i, sk, ek = int(r[k]), int(s[k]), int(e[k])
+        for i2 in (i - 1, i + 1):
+            if i2 < 0 or i2 >= ny:
+                continue
+            lo, hi = int(row_first[i2]), int(row_first[i2 + 1])
+            if lo == hi:
+                continue
+            a = lo + int(np.searchsorted(e[lo:hi], sk, side='right'))    # первый отрезок с концом > sk
+            b = lo + int(np.searchsorted(s[lo:hi], ek, side='left'))     # отрезки с началом < ek
+            for k2 in range(a, b):
+                if not visited[k2]:
+                    visited[k2] = True
+                    stack.append(k2)
+    mask = np.zeros_like(free)
+    for k in np.flatnonzero(visited):
+        mask[r[k], s[k]:e[k]] = True
+    return mask
+
+
+def _region_seed_cell(wall, i0, j0, radius=REGION_SEED_SEARCH):
+    """Свободная ячейка для точки: сама (i0, j0) или ближайшая свободная в радиусе
+    radius ячеек (щелчок попал точно на кривую или ось)."""
+    ny, nx = wall.shape
+    if not (0 <= i0 < ny and 0 <= j0 < nx):
+        return None
+    if not wall[i0, j0]:
+        return i0, j0
+    best = None
+    for di in range(-radius, radius + 1):
+        for dj in range(-radius, radius + 1):
+            i, j = i0 + di, j0 + dj
+            if 0 <= i < ny and 0 <= j < nx and not wall[i, j]:
+                d = di * di + dj * dj
+                if best is None or d < best[0]:
+                    best = (d, i, j)
+    return (best[1], best[2]) if best else None
+
+
+def _region_center(mask):
+    """Ячейка (i, j) области, самая далёкая от её границы и ближайшая к центру
+    масс среди таких - место для подписи площади."""
+    ny, nx = mask.shape
+    blocked = ~mask
+    jj = np.broadcast_to(np.arange(nx)[None, :], mask.shape)
+    ii = np.broadcast_to(np.arange(ny)[:, None], mask.shape)
+    left = jj - np.maximum.accumulate(np.where(blocked, jj, -1), axis=1)
+    right = np.minimum.accumulate(np.where(blocked, jj, nx)[:, ::-1], axis=1)[:, ::-1] - jj
+    down = ii - np.maximum.accumulate(np.where(blocked, ii, -1), axis=0)
+    up = np.minimum.accumulate(np.where(blocked, ii, ny)[::-1, :], axis=0)[::-1, :] - ii
+    score = np.minimum(np.minimum(left, right), np.minimum(up, down)).astype(float)
+    score[blocked] = 0.0
+    best = float(score.max())
+    if best <= 0:
+        return None
+    cand = np.argwhere(score >= best * 0.85)
+    ci, cj = np.argwhere(mask).mean(axis=0)
+    d = (cand[:, 0] - ci) ** 2 + (cand[:, 1] - cj) ** 2
+    i, j = cand[int(np.argmin(d))]
+    return int(i), int(j)
+
+
+def _bisect_implicit(h, xs, ya, yb, iters=30):
+    """Корни h(x, y) = 0 по y на отрезках [ya, yb] (векторно, деление пополам);
+    NaN там, где знак на концах не меняется."""
+    xs = np.asarray(xs, dtype=float)
+    ya = np.asarray(ya, dtype=float).copy()
+    yb = np.asarray(yb, dtype=float).copy()
+    res = np.full(xs.shape, np.nan)
+
+    def ev(x, y):
+        with np.errstate(all='ignore'):
+            v = np.asarray(h(x, y), dtype=float)
+        return np.broadcast_to(v, x.shape).astype(float)
+
+    fa, fb = ev(xs, ya), ev(xs, yb)
+    ok = np.isfinite(fa) & np.isfinite(fb) & (fa * fb <= 0)
+    if not ok.any():
+        return res
+    a, b, fa_, x_ = ya[ok], yb[ok], fa[ok], xs[ok]
+    for _ in range(iters):
+        mid = 0.5 * (a + b)
+        fm = ev(x_, mid)
+        left = fa_ * fm <= 0
+        b = np.where(left, mid, b)
+        a = np.where(left, a, mid)
+        fa_ = np.where(left, fa_, fm)
+    res[ok] = 0.5 * (a + b)
+    return res
+
+
 def _plot_function_impl(fig=None):
     global CURVE_WIDTHS, CURVE_STYLES, CURVE_COLORS
     global _active_free_text_manager, _active_axis_label_manager
@@ -3501,7 +3771,7 @@ def _plot_function_impl(fig=None):
     # dict: {'kind','color', и колбэки}. kind ∈ 'func' | 'implicit' | 'vline' | 'error'.
     curve_meta   = []
 
-    def draw_vline(func_idx, func_str, payload, color, lw, ls):
+    def draw_vline(func_idx, func_str, payload, color, lw, ls, hidden=False):
         cx = payload
         if cx is None or not np.isfinite(cx):
             raise ValueError(f"cannot parse the constant in '{func_str}'")
@@ -3516,7 +3786,7 @@ def _plot_function_impl(fig=None):
                 y_lo_line = max(y_lo_line, d_from)
             if d_to != float("inf"):
                 y_hi_line = min(y_hi_line, d_to)
-        if X_LIM_L <= cx <= X_LIM_R and y_lo_line < y_hi_line:
+        if not hidden and X_LIM_L <= cx <= X_LIM_R and y_lo_line < y_hi_line:
             ax.plot([cx, cx], [y_lo_line, y_hi_line],
                     color=color, linewidth=lw, linestyle=ls, zorder=5)
             # Подпись точки пересечения с осью X: (c, 0)
@@ -3526,10 +3796,13 @@ def _plot_function_impl(fig=None):
                                    above=True, color=color)
                 mark_point(cx, 0, color, markersize=5, zorder=8)
         func_data.append((None, None, color))
-        curve_meta.append({'kind': 'vline', 'color': color,
-                           'x': cx, 'x_exact': cx_exact})
+        meta = {'kind': 'vline', 'color': color, 'x': cx, 'x_exact': cx_exact,
+                'y_range': (y_lo_line, y_hi_line)}
+        if hidden:
+            meta['hidden'] = True        # скрыта глазком: не рисуется, но остаётся границей областей
+        curve_meta.append(meta)
 
-    def draw_implicit(func_idx, lhs_str, rhs_str, color, lw, ls):
+    def draw_implicit(func_idx, lhs_str, rhs_str, color, lw, ls, hidden=False):
         H_sym, h = build_implicit_func(lhs_str, rhs_str)
         # Сетка по видимому окну. Плотность подобрана как компромисс
         # гладкость/скорость; contour сам интерполирует линию уровня 0.
@@ -3561,6 +3834,17 @@ def _plot_function_impl(fig=None):
                         linewidths=lw, linestyles=[ls_map.get(ls, 'solid')],
                         zorder=5)
         segs = _contour_segments(cs)
+        if hidden:
+            # скрыта глазком: линия уровня нужна только как граница областей
+            try:
+                cs.remove()
+            except Exception:
+                for coll in getattr(cs, 'collections', []):
+                    coll.remove()
+            func_data.append((None, None, color))
+            curve_meta.append({'kind': 'implicit', 'hidden': True, 'color': color,
+                               'h': h, 'H': H_sym, 'segs': segs})
+            return
 
         # ── Пересечения неявной кривой с осями ──────────
         # Ось X: корни H(x, 0)=0 -> точки (x, 0)
@@ -3742,9 +4026,13 @@ def _plot_function_impl(fig=None):
                 raise _EmptyFunction()
             kind, payload = _parse_equation_input(func_str)
             if func_idx in CURVE_HIDDEN:
+                # скрытые глазком: не рисуются, но остаются границами областей
                 if kind == 'func':
                     register_hidden_func(func_idx, payload, color)
-                # скрытые вертикали/неявные кривые для заливок не нужны — пропускаем
+                elif kind == 'vline':
+                    draw_vline(func_idx, func_str, payload, color, lw, ls, hidden=True)
+                elif kind == 'implicit':
+                    draw_implicit(func_idx, payload[0], payload[1], color, lw, ls, hidden=True)
             elif kind == 'vline':
                 draw_vline(func_idx, func_str, payload, color, lw, ls)
             elif kind == 'implicit':
@@ -3901,104 +4189,268 @@ def _plot_function_impl(fig=None):
         b = int(b + (255 - b) * factor)
         return f'#{r:02x}{g:02x}{b:02x}'
 
-    def draw_fill_lines(ax, xf, y1_fill, y2_fill, valid, fill_style, color,
-                        x_lim_l, x_lim_r, y_lim_b, y_lim_t, density=0.01,
-                        ax_px=(600.0, 600.0)):
-        x_span = x_lim_r - x_lim_l
-        y_span = y_lim_t - y_lim_b
-        # Масштабы по осям могут отличаться (aspect 'auto'), поэтому штриховку
-        # строим в ЭКРАННЫХ пикселях: линии под 45° на экране — это y = sign·k·x + c
-        # в данных, где k = (px/ед. по X)/(px/ед. по Y). Шаг — тоже в пикселях,
-        # чтобы плотность не зависела от окна просмотра.
-        sx = ax_px[0] / x_span          # пикселей на единицу X
-        sy = ax_px[1] / y_span          # пикселей на единицу Y
+    # ══════════════════════════════════════════════
+    #  ЗАЛИВКИ: область по точке (щелчку)
+    # ══════════════════════════════════════════════
+    def region_grid():
+        nx = int(min(REGION_MAX_CELLS, max(REGION_MIN_CELLS, round(_ax_w_px))))
+        ny = int(min(REGION_MAX_CELLS, max(REGION_MIN_CELLS, round(_ax_h_px))))
+        return nx, ny, x_span / nx, y_span / ny
+
+    def build_region_walls(nx, ny, dx, dy):
+        """Стены: все кривые (и скрытые глазком), оси координат. Края окна -
+        границы растра. Возвращает (wall, ids, ids2)."""
+        wall = np.zeros((ny, nx), dtype=bool)
+        ids = np.full((ny, nx), REGION_ID_NONE, dtype=np.int32)
+        ids2 = np.full((ny, nx), REGION_ID_NONE, dtype=np.int32)
+
+        def mark(cid, xs, ys):
+            _mark_polyline(wall, ids, cid, xs, ys, X_LIM_L, Y_LIM_B, dx, dy, ids2=ids2)
+
+        def curve_values(m):
+            """Значения функции на сетке x_vals для стены: без масок разрывов
+            (у дырки стена не рвётся), вне ОДЗ - NaN, одиночные NaN между
+            конечными значениями сшиваются."""
+            yv = np.array(_eval_array(m['f'], x_vals), dtype=float, copy=True)
+            lo, hi = m.get('domain', (float('-inf'), float('inf')))
+            if lo != float('-inf') or hi != float('inf'):
+                yv[(x_vals < lo) | (x_vals > hi)] = np.nan
+            bad = ~np.isfinite(yv)
+            if bad.any() and yv.size > 2:
+                k = np.flatnonzero(bad[1:-1] & ~bad[:-2] & ~bad[2:]) + 1
+                if k.size:
+                    ok = np.abs(yv[k + 1] - yv[k - 1]) < y_span
+                    k = k[ok]
+                    yv[k] = 0.5 * (yv[k - 1] + yv[k + 1])
+            return yv
+
+        for idx, m in enumerate(curve_meta):
+            kind = m.get('kind')
+            try:
+                if kind == 'func':
+                    mark(idx, x_vals, curve_values(m))
+                elif kind == 'implicit':
+                    for sg in m.get('segs', []):
+                        mark(idx, sg[:, 0], sg[:, 1])
+                elif kind == 'vline':
+                    y0, y1 = m.get('y_range', (Y_LIM_B, Y_LIM_T))
+                    if y1 > y0 and X_LIM_L <= m['x'] <= X_LIM_R:
+                        mark(idx, [m['x'], m['x']], [y0, y1])
+            except Exception:
+                logging.getLogger(__name__).debug("region wall %d skipped", idx, exc_info=True)
+        if Y_LIM_B <= 0.0 <= Y_LIM_T:
+            mark(REGION_ID_X_AXIS, [X_LIM_L, X_LIM_R], [0.0, 0.0])
+        if X_LIM_L <= 0.0 <= X_LIM_R:
+            mark(REGION_ID_Y_AXIS, [0.0, 0.0], [Y_LIM_B, Y_LIM_T])
+        return wall, ids, ids2
+
+    def region_F(cid):
+        """Знаковая функция границы: > 0 с одной стороны кривой, < 0 с другой,
+        NaN вне ОДЗ. Принимает массивы любой формы."""
+        if cid == REGION_ID_X_AXIS:
+            return lambda X, Y: np.asarray(Y, dtype=float) + 0.0 * np.asarray(X, dtype=float)
+        if cid == REGION_ID_Y_AXIS:
+            return lambda X, Y: np.asarray(X, dtype=float) + 0.0 * np.asarray(Y, dtype=float)
+        m = curve_meta[int(cid)]
+        if m['kind'] == 'func':
+            f = m['f']
+            lo, hi = m.get('domain', (float('-inf'), float('inf')))
+
+            def F(X, Y):
+                X = np.asarray(X, dtype=float)
+                Y = np.asarray(Y, dtype=float)
+                v = _eval_array(f, X.ravel()).reshape(X.shape)
+                out = Y - v
+                if lo != float('-inf') or hi != float('inf'):
+                    out = np.where((X < lo) | (X > hi), np.nan, out)
+                return out
+            return F
+        if m['kind'] == 'implicit':
+            h = m['h']
+
+            def F(X, Y):
+                X = np.asarray(X, dtype=float)
+                Y = np.asarray(Y, dtype=float)
+                with np.errstate(all='ignore'):
+                    v = np.asarray(h(X, Y), dtype=float)
+                return np.broadcast_to(v, X.shape).astype(float)
+            return F
+        if m['kind'] == 'vline':
+            c = float(m['x'])
+            y0, y1 = m.get('y_range', (Y_LIM_B, Y_LIM_T))
+
+            def F(X, Y):
+                X = np.asarray(X, dtype=float)
+                Y = np.asarray(Y, dtype=float)
+                out = X - c + 0.0 * Y
+                return np.where((Y < y0) | (Y > y1), np.nan, out)
+            return F
+        return None
+
+    def draw_region_hatch(mask, style, color, density, nx, ny, dx, dy):
+        """Штриховка области: семейство линий под 45°/135° НА ЭКРАНЕ (масштабы по
+        осям могут отличаться) или точки на фиксированной решётке. Каждая точка
+        линии проверяется по маске области."""
+        sx = _ax_w_px / x_span
+        sy = _ax_h_px / y_span
         k = sx / sy
-        step_px = density * min(ax_px)
-        step_c = step_px * np.sqrt(2) / sy      # шаг c в единицах Y
-        lw   = 0.6
+        step_px = max(1.0, density * min(_ax_w_px, _ax_h_px))
+        step_c = step_px * np.sqrt(2) / sy
+        sign = -1 if style == 1 else 1
+        corners_c = [Y_LIM_B - sign * k * X_LIM_L, Y_LIM_B - sign * k * X_LIM_R,
+                     Y_LIM_T - sign * k * X_LIM_L, Y_LIM_T - sign * k * X_LIM_R]
+        c_vals = np.arange(min(corners_c) - step_c, max(corners_c) + step_c, step_c)
 
-        # Стиль штриховки:
-        #   0 — 45°,  сплошная диагональная линия
-        #   1 — 135°, сплошная диагональная линия
-        #   2 — "точки" — та же диагональная решётка (семейство параллельных
-        #       линий + та же логика клиппинга по границе), что и у 45°,
-        #       но вместо непрерывной линии на каждой диагонали ставятся
-        #       отдельные точки на ФИКСИРОВАННОЙ глобальной сетке с шагом,
-        #       зависящим от density. Сетка не зависит от формы границы —
-        #       поэтому точки не "облипают" контур функции — и расстояние
-        #       между любыми соседними точками (что вдоль диагонали, что
-        #       между соседними диагоналями) всегда одинаковое.
-        sign = -1 if fill_style == 1 else 1   # стили 0 и 2 — одно семейство 45°
+        def inside(xa, ya):
+            j = np.floor((xa - X_LIM_L) / dx).astype(np.int64)
+            i = np.floor((ya - Y_LIM_B) / dy).astype(np.int64)
+            ok = (i >= 0) & (i < ny) & (j >= 0) & (j < nx)
+            res = np.zeros(xa.shape, dtype=bool)
+            res[ok] = mask[i[ok], j[ok]]
+            return res
 
-        y_lo = np.minimum(y1_fill, y2_fill)
-        y_hi = np.maximum(y1_fill, y2_fill)
-
-        # Диапазон c должен покрыть все углы видимой области (линия y = sign·k·x + c)
-        corners_c = [
-            y_lim_b - sign * k * x_lim_l,
-            y_lim_b - sign * k * x_lim_r,
-            y_lim_t - sign * k * x_lim_l,
-            y_lim_t - sign * k * x_lim_r,
-        ]
-        c_min = min(corners_c) - step_c
-        c_max = max(corners_c) + step_c
-        c_vals = np.arange(c_min, c_max, step_c)
-
-        if fill_style == 2:
-            # Шаг по x, который при движении вдоль линии под 45° на экране
-            # даёт ровно евклидово (экранное) расстояние step_px между точками.
+        if style == 2:
             dot_dx = max(step_px / np.sqrt(2) / sx, 1e-9)
-            # Привязываем фазу решётки к глобальной системе координат
-            # (x_lim_l), а не к границам конкретной заливки — так точки
-            # не "прыгают" при изменении from/to.
-            n0 = int(np.ceil((xf[0] - x_lim_l) / dot_dx))
-            x_start = x_lim_l + n0 * dot_dx
-            xs_lat = np.arange(x_start, xf[-1] + dot_dx * 0.5, dot_dx)
-            # Оставляем только узлы решётки, строго попадающие в диапазон x
-            # самой заливки. Без этого крайний узел мог оказаться чуть за
-            # пределами [xf[0], xf[-1]] (особенно при малой плотности —
-            # большом dot_dx), а np.clip ниже "притягивал" его индекс к
-            # крайнему столбцу xf, и точка проходила проверку границ заливки,
-            # хотя по x была уже вне окраса — отсюда точки за рамкой.
-            xs_lat = xs_lat[(xs_lat >= xf[0]) & (xs_lat <= xf[-1])]
-            if len(xs_lat) == 0:
-                return
-            idx = np.clip(np.searchsorted(xf, xs_lat), 0, len(xf) - 1)
-
+            xs_lat = X_LIM_L + np.arange(0, int(x_span / dot_dx) + 1) * dot_dx
+            px_all, py_all = [], []
             for c in c_vals:
                 y_lat = sign * k * xs_lat + c
-                ok = (valid[idx] &
-                      (y_lat >= y_lo[idx]) & (y_lat <= y_hi[idx]))
-                if np.any(ok):
-                    ax.plot(xs_lat[ok], y_lat[ok], '.', color=color,
-                            markersize=2.2, linewidth=0, zorder=4)
+                ok = inside(xs_lat, y_lat)
+                if ok.any():
+                    px_all.append(xs_lat[ok])
+                    py_all.append(y_lat[ok])
+            if px_all:
+                ax.plot(np.concatenate(px_all), np.concatenate(py_all), '.', color=color,
+                        markersize=2.2, linewidth=0, zorder=4)
             return
-
-        # 45° (style 0) и 135° (style 1) — сплошные параллельные диагональные линии
+        xs = np.linspace(X_LIM_L, X_LIM_R, 2 * nx + 1)        # шаг - полклетки
+        segs = []
         for c in c_vals:
-            # Линия: y = sign*k*x + c  (45° на экране)
-            y_line = sign * k * xf + c
+            ys = sign * k * xs + c
+            ok = inside(xs, ys)
+            if not ok.any():
+                continue
+            d = np.diff(np.concatenate(([0], ok.view(np.int8), [0])))
+            for a, b in zip(np.flatnonzero(d == 1), np.flatnonzero(d == -1)):
+                if b - a >= 2:
+                    segs.append(np.column_stack((xs[a:b], ys[a:b])))
+        if segs:
+            from matplotlib.collections import LineCollection
+            ax.add_collection(LineCollection(segs, colors=[color], linewidths=0.6, zorder=4),
+                              autolim=False)
 
-            # Клипируем линию по области заливки [y_lo, y_hi]
-            y_clipped = np.where(
-                valid & (y_line >= y_lo) & (y_line <= y_hi),
-                y_line, np.nan
-            )
-
-            # Разбиваем на непрерывные куски и рисуем каждый
-            seg_x, seg_y = [], []
-            for xi, yi in zip(xf, y_clipped):
-                if np.isfinite(yi):
-                    seg_x.append(xi)
-                    seg_y.append(yi)
+    def region_area(mask, wall, ids, ids2, nx, ny, dx, dy):
+        """
+        Площадь области: целые свободные ячейки плюс доли ячеек-стен вдоль
+        границы. Полоса стены у крутой кривой бывает в несколько ячеек, поэтому
+        от ячеек, соседних с маской, идём вглубь полосы по стенам тех же кривых,
+        оставаясь с нужной стороны всех остальных границ. Доля ячейки с одной
+        кривой - marching squares по знакам в углах (точно для прямых и осей,
+        второй порядок для кривых), с двумя и более - подвыборка 12×12.
+        """
+        cell = dx * dy
+        area = float(np.count_nonzero(mask)) * cell
+        near = _dilate4(mask) & wall
+        if not near.any():
+            return area
+        b_ids = set(int(v) for v in np.unique(ids[near])) | set(int(v) for v in np.unique(ids2[near]))
+        b_ids -= {REGION_ID_NONE, REGION_ID_MULTI}
+        # Знаковые функции всех кривых окна (не только граничных): область лежит по
+        # одну сторону от каждой из них, и это отсекает «чужие» ячейки у углов, где
+        # граница тоньше ячейки и в near не попала (ось Y у вершины параболы)
+        all_ids = [i for i, m in enumerate(curve_meta) if m.get('kind') in ('func', 'implicit', 'vline')]
+        if Y_LIM_B <= 0.0 <= Y_LIM_T:
+            all_ids.append(REGION_ID_X_AXIS)
+        if X_LIM_L <= 0.0 <= X_LIM_R:
+            all_ids.append(REGION_ID_Y_AXIS)
+        Fs = {}
+        for c in all_ids:
+            try:
+                F = region_F(c)
+            except Exception:
+                F = None
+            if F is not None:
+                Fs[c] = F
+        # Сторона области для каждой кривой: знак F в ячейках маски у границы;
+        # 0 - знак не постоянен (кривая обрывается внутри области) или неизвестен
+        mi, mj = np.nonzero(_dilate4(near) & mask)
+        xm = X_LIM_L + (mj + 0.5) * dx
+        ym = Y_LIM_B + (mi + 0.5) * dy
+        side = {}
+        for c, F in Fs.items():
+            try:
+                v = F(xm, ym)
+                fin = np.isfinite(v) & (v != 0)
+                if not fin.any():
+                    side[c] = 0
                 else:
-                    if len(seg_x) > 1:
-                        ax.plot(seg_x, seg_y, color=color,
-                                linewidth=lw, zorder=4)
-                    seg_x, seg_y = [], []
-            if len(seg_x) > 1:
-                ax.plot(seg_x, seg_y, color=color,
-                        linewidth=lw, zorder=4)
+                    p = float(np.mean(v[fin] > 0))
+                    side[c] = 1 if p >= 0.9 else (-1 if p <= 0.1 else 0)
+            except Exception:
+                side[c] = 0
+        # Кандидаты в полосу: стены граничных кривых (и ячейки, где сошлись три и
+        # больше кривых) плюс свободные ячейки, отрезанные от маски полосой стены
+        # (карманы у острых углов, тонкие клинья у касаний), - все с нужной стороны
+        # остальных кривых: проверка по всем кривым не даёт уйти в соседнюю область
+        cand = (wall & np.isin(ids, list(b_ids))
+                & (np.isin(ids2, list(b_ids)) | (ids2 == REGION_ID_NONE) | (ids2 == REGION_ID_MULTI)))
+        cand |= ~wall & ~mask
+        ci, cj = np.nonzero(cand)
+        if ci.size:
+            xc = X_LIM_L + (cj + 0.5) * dx
+            yc = Y_LIM_B + (ci + 0.5) * dy
+            own1, own2 = ids[ci, cj], ids2[ci, cj]
+            keep = np.ones(ci.size, dtype=bool)
+            for c, F in Fs.items():
+                if side[c] == 0:
+                    continue
+                try:
+                    v = F(xc, yc) * side[c]
+                except Exception:
+                    continue
+                keep &= ~(np.isfinite(v) & (v < 0) & (own1 != c) & (own2 != c))
+            cand[ci[~keep], cj[~keep]] = False
+        band = near.copy()
+        for _ in range(4 * (nx + ny)):          # полоса стены 8-связна - идём по 8 соседям
+            new = _dilate8(band) & cand & ~band
+            if not new.any():
+                break
+            band |= new
+        bi, bj = np.nonzero(band)
+        id1, id2 = ids[bi, bj], ids2[bi, bj]
+        is_wall = wall[bi, bj]
+        x0 = X_LIM_L + bj * dx
+        y0 = Y_LIM_B + bi * dy
+        portion = np.where(is_wall, 0.5, 1.0)         # свободный карман - целая ячейка
+        single = is_wall & (id2 == REGION_ID_NONE) & np.isin(id1, [c for c in Fs if side[c] != 0])
+        for c in np.unique(id1[single]):
+            sel = single & (id1 == c)
+            F, s = Fs[int(c)], side[int(c)]
+            try:
+                fs = [F(x0[sel] + px * dx, y0[sel] + py * dy) * s
+                      for px, py in ((0, 0), (1, 0), (1, 1), (0, 1))]
+                portion[sel] = _ms_area(*fs)
+            except Exception:
+                pass
+        multi = is_wall & ~single
+        if multi.any():
+            n_sub = 12
+            offs = (np.arange(n_sub) + 0.5) / n_sub
+            gx, gy = np.meshgrid(offs, offs)
+            X = x0[multi][:, None] + gx.ravel()[None, :] * dx
+            Y = y0[multi][:, None] + gy.ravel()[None, :] * dy
+            inside = np.ones(X.shape, dtype=bool)
+            for c, F in Fs.items():
+                if side[c] == 0:
+                    continue
+                try:
+                    v = F(X, Y) * side[c]
+                except Exception:
+                    continue
+                inside &= ~(np.isfinite(v) & (v < 0))
+            portion[multi] = inside.mean(axis=1)
+        _LAST_REGION.update(band=band, portion=portion, bi=bi, bj=bj)
+        return area + float(portion.sum()) * cell
 
     def _exact_bound(v, raw):
         """Точная граница интеграла: из исходной строки (pi/2) или из «круглого» числа."""
@@ -4013,6 +4465,148 @@ def _plot_function_impl(fig=None):
             pass
         return None
 
+    def region_exact(area, mask, ids, ids2, nx, ny, dx, dy):
+        """
+        Точная площадь для «школьного» случая: в каждом столбце один отрезок,
+        сверху и снизу всюду одна и та же пара (функция или ось X), слева и
+        справа - вертикаль x = c, ось Y или точка встречи верхней и нижней
+        кривых (точный корень разности). Тогда S = |∫ (верх − низ) dx| через
+        sympy.integrate в фоновом потоке (sym_cached); принимается, если
+        совпадает с численной площадью. Возвращает точную форму или None.
+        """
+        cols, s, e = _runs_along_rows(mask.T)           # вертикальные отрезки: столбец, i_от, i_до
+        if cols.size == 0 or np.unique(cols).size != cols.size:
+            return None                                 # пусто или где-то два отрезка в столбце
+        order = np.argsort(cols)
+        cols, s, e = cols[order], s[order], e[order]
+        if s.min() <= 0 or e.max() >= ny or cols[0] == 0 or cols[-1] == nx - 1:
+            return None                                 # упирается в край окна
+
+        def single(ci):
+            one = ids2[ci, cols] == REGION_ID_NONE      # ячейки ровно с одной кривой
+            vals = {int(v) for v in np.unique(ids[ci, cols][one])} - {REGION_ID_MULTI, REGION_ID_NONE}
+            return vals.pop() if len(vals) == 1 else None
+
+        t_id, b_id = single(e), single(s - 1)
+        if t_id is None or b_id is None or t_id == b_id:
+            return None
+
+        def expr_and_f(cid):
+            if cid == REGION_ID_X_AXIS:
+                return Integer(0), (lambda t: 0.0 * np.asarray(t, dtype=float))
+            if cid >= 0 and curve_meta[cid]['kind'] == 'func':
+                m = curve_meta[cid]
+                ex = m['expr']
+                if m.get('x_sym') is not None and m['x_sym'] != _X_SYM:
+                    ex = ex.subs(m['x_sym'], _X_SYM)
+                return ex, m['f']
+            return None, None
+
+        top_e, top_f = expr_and_f(t_id)
+        bot_e, bot_f = expr_and_f(b_id)
+        if top_e is None or bot_e is None:
+            return None
+        diff_e = top_e - bot_e
+
+        def g(t):
+            return _safe_val(top_f, t) - _safe_val(bot_f, t)
+
+        def meet_root(edge, left):
+            """Точка встречи верхней и нижней кривых: от края маски наружу ищем
+            первую смену знака разности (brentq) или касание (минимум |разности|
+            ≈ 0, как у x² и оси X в начале координат). Тонкий «клин» у касания
+            может тянуться на десятки столбцов, поэтому ищем далеко."""
+            span = max(0.15 * x_span, 6 * dx)
+            if left:
+                ts = np.linspace(edge + 3 * dx, edge - span, 600)
+            else:
+                ts = np.linspace(edge - 3 * dx, edge + span, 600)
+            gv = _eval_array(top_f, ts) - _eval_array(bot_f, ts)
+            fin = np.isfinite(gv)
+            if not fin.any():
+                return None
+            scale = max(1.0, float(np.max(np.abs(gv[fin]))))
+            for i in range(len(ts) - 1):
+                ga, gb = gv[i], gv[i + 1]
+                if not np.isfinite(ga):
+                    continue
+                if not np.isfinite(gb):
+                    # край ОДЗ (как у √x): уточняем границу и проверяем, что разность там ≈ 0
+                    a_, b_ = ts[i], ts[i + 1]
+                    for _ in range(50):
+                        mid = 0.5 * (a_ + b_)
+                        if np.isfinite(g(mid)):
+                            a_ = mid
+                        else:
+                            b_ = mid
+                    return a_ if abs(g(a_)) <= 1e-4 * scale else None
+                if ga == 0.0:
+                    return float(ts[i])
+                if ga * gb < 0:
+                    return float(brentq(g, min(ts[i], ts[i + 1]), max(ts[i], ts[i + 1]), xtol=1e-12))
+                if i >= 1 and np.isfinite(gv[i - 1]) and abs(ga) <= abs(gv[i - 1]) and abs(ga) <= abs(gb) \
+                        and abs(ga) <= 1e-3 * scale:
+                    lo_, hi_ = min(ts[i - 1], ts[i + 1]), max(ts[i - 1], ts[i + 1])
+                    r = minimize_scalar(lambda t: abs(g(t)), bounds=(lo_, hi_), method='bounded',
+                                        options={'xatol': 1e-12})
+                    if abs(g(r.x)) <= 1e-7 * scale:
+                        return float(r.x)
+            return None
+
+        def end_point(jw, run_s, run_e, left):
+            """(точное x, численное x) стены слева/справа от крайнего столбца."""
+            vals = {int(v) for v in np.unique(ids[run_s:run_e, jw])}
+            vals |= {int(v) for v in np.unique(ids2[run_s:run_e, jw])}
+            edge = X_LIM_L + (jw + 1) * dx if left else X_LIM_L + jw * dx
+            if REGION_ID_Y_AXIS in vals:
+                return Integer(0), 0.0
+            for v in sorted(vals):
+                if v >= 0 and curve_meta[v]['kind'] == 'vline':
+                    m = curve_meta[v]
+                    ex = m.get('x_exact')
+                    if ex is None:
+                        ex = _exact_bound(m['x'], None)
+                    return ex, float(m['x'])
+            # кривые сходятся: точка встречи снаружи от края маски
+            try:
+                xr = meet_root(edge, left)
+                if xr is None:
+                    return None, None
+                c_list = cands(diff_e, _X_SYM, 'roots', X_LIM_L, X_LIM_R)
+                return exact_root(xr, diff_e, _X_SYM, c_list, 'inter'), float(xr)
+            except Exception:
+                return None, None
+
+        ea, xa = end_point(int(cols[0]) - 1, int(s[0]), int(e[0]), True)
+        eb, xb = end_point(int(cols[-1]) + 1, int(s[-1]), int(e[-1]), False)
+        if ea is None or eb is None or xa is None or xb is None or not xa < xb:
+            return None
+        try:
+            ts = np.linspace(xa, xb, 401)
+            d = _eval_array(top_f, ts) - _eval_array(bot_f, ts)
+            if not np.all(np.isfinite(d)):
+                return None
+            tol = 1e-9 * max(1.0, float(np.abs(d).max()))
+            if not (d.min() >= -tol or d.max() <= tol):
+                return None                             # разность меняет знак
+            key = ('area', _ekey(diff_e), str(ea), str(eb))
+
+            def _job(diff=diff_e, ea=ea, eb=eb):
+                from sympy import integrate, Abs as _Abs, simplify
+                val = integrate(diff, (_X_SYM, ea, eb))
+                val = simplify(_Abs(val))
+                if val.free_symbols or val.has(oo, -oo, zoo, nan):
+                    return None
+                return val
+            cand = sym_cached(key, _job)
+            if cand is not None and abs(float(cand) - area) <= 2e-3 * max(1.0, area) + 1e-6:
+                return cand
+        except SymbolicPending:
+            pass
+        except Exception:
+            pass
+        return None
+
     def area_label_text(area, exact):
         """«S = 1/3» (точно, если форма читаема) или «S ≈ 1.234»."""
         if exact is not None and exact_is_readable(exact):
@@ -4021,7 +4615,7 @@ def _plot_function_impl(fig=None):
         return math_label("S \\approx " + txt) if TEX else "S ≈ " + txt
 
     def annotate_area(fi, xc, yc, text, color):
-        """Подпись площади в центре заливки; перетаскивается, смещение запоминается."""
+        """Подпись площади внутри области; перетаскивается, смещение запоминается."""
         home = (xc, yc)
         off_key = ("area", int(fi), 0.0)
         off = ANNOTATION_OFFSETS.get(off_key)
@@ -4040,142 +4634,72 @@ def _plot_function_impl(fig=None):
                                               pt_scale=(pt_to_x, pt_to_y)))
         return ann
 
-    def fill_area(fi, f1_func, f2_func, a, b, raw_a, raw_b, meta1, meta2):
-        """
-        Площадь между f1 и f2 на [a, b] (геометрическая, ∫|f1 − f2|dx).
-        Возвращает (число, точное выражение или None). Точная форма — через
-        sympy.integrate в фоновом потоке (sym_cached), только если разность
-        не меняет знак на отрезке и результат совпадает с численным.
-        """
-        xs = np.linspace(a, b, 4001)
-        y1 = _eval_array(f1_func, xs)
-        y2 = _eval_array(f2_func, xs) if f2_func is not None else np.zeros_like(y1)
-        d = y1 - y2
-        ok = np.isfinite(d)
-        if ok.sum() < 2:
-            return None, None
-        _trap = getattr(np, 'trapezoid', None) or getattr(np, 'trapz')     # numpy 2.x / 1.x
-        area = float(_trap(np.abs(d[ok]), xs[ok]))
-        if not math.isfinite(area):
-            return None, None
-        exact = None
+    def region_color(mask, wall, ids, ids2):
+        """Цвет области: цвет кривой с наименьшим индексом среди её границ,
+        иначе цвет осей темы."""
         try:
-            e1 = meta1.get('expr') if meta1 else None
-            e2 = meta2.get('expr') if meta2 else (Integer(0) if f2_func is None else None)
-            if e1 is not None and e2 is not None and ok.all():
-                dmin, dmax = float(d.min()), float(d.max())
-                tol = 1e-9 * max(1.0, abs(dmin), abs(dmax))
-                if dmin >= -tol or dmax <= tol:          # знак постоянен
-                    ea, eb = _exact_bound(a, raw_a), _exact_bound(b, raw_b)
-                    if ea is not None and eb is not None:
-                        diff = e1 - e2
-                        key = ('area', _ekey(diff), str(ea), str(eb))
-
-                        def _job(diff=diff, ea=ea, eb=eb):
-                            from sympy import integrate, Abs as _Abs, simplify
-                            val = integrate(diff, (_X_SYM, ea, eb))
-                            val = simplify(_Abs(val))
-                            if val.free_symbols or val.has(oo, -oo, zoo, nan):
-                                return None
-                            return val
-                        cand = sym_cached(key, _job)
-                        if cand is not None:
-                            try:
-                                if abs(float(cand) - area) <= 1e-6 * max(1.0, area) + 1e-9:
-                                    exact = cand
-                            except Exception:
-                                exact = None
-        except SymbolicPending:
-            exact = None
+            near = _dilate4(mask) & wall
+            border = np.concatenate((ids[near], ids2[near]))
+            cids = border[border >= 0]
+            if cids.size:
+                return curve_meta[int(cids.min())]['color']
         except Exception:
-            exact = None
-        return area, exact
+            pass
+        return LABEL_COLOR
 
-    for fi, fill_entry in enumerate(FILL):
+    _region_cache = {}
+    for fi, entry in enumerate(FILL):
+        LAST_FILL_AREAS[fi] = None
         try:
-            # Формат: (f1, f2, x_от, x_до, стиль, границы, плотность[, площадь, от_строка, до_строка])
-            f1_idx, f2, fx_from, fx_to, fill_style = fill_entry[:5]
-            show_borders = fill_entry[5] if len(fill_entry) > 5 else True
-            density      = fill_entry[6] if len(fill_entry) > 6 else 0.01
-            show_area    = bool(fill_entry[7]) if len(fill_entry) > 7 else False
-            raw_from     = fill_entry[8] if len(fill_entry) > 8 else None
-            raw_to       = fill_entry[9] if len(fill_entry) > 9 else None
-            full_from, full_to = fx_from, fx_to          # границы интеграла — как задал пользователь
-
-            if f1_idx >= len(func_data):
-                continue
-
-            f1_func, y1_all, color1 = func_data[f1_idx]
-            # Заливка относительно вертикальной линии не имеет смысла — пропускаем.
-            if f1_func is None:
-                continue
-
-            fx_from = max(fx_from, X_LIM_L)
-            fx_to   = min(fx_to,   X_LIM_R)
-            if fx_from >= fx_to:
-                continue
-
-            mask = (x_vals >= fx_from) & (x_vals <= fx_to)
-            xf   = x_vals[mask]
-            if len(xf) < 2:
-                continue
-
-            y1_fill = _eval_array(f1_func, xf)
-            y1_fill = np.clip(y1_fill, Y_LIM_B, Y_LIM_T)
-
-            if isinstance(f2, str) or f2 is None:
-                y2_fill = np.zeros_like(y1_fill)
-                fill_color = lighten_color(color1)
+            if isinstance(entry, dict):
+                sx_, sy_ = entry.get('x'), entry.get('y')
+                fill_style = int(entry.get('style', 0) or 0)
+                density = float(entry.get('density', 0.01) or 0.01)
+                show_area = bool(entry.get('area', True))
             else:
-                if f2 >= len(func_data):
-                    continue
-                f2_func = func_data[f2][0]
-                if f2_func is None:
-                    continue
-                y2_fill = _eval_array(f2_func, xf)
-                y2_fill = np.clip(y2_fill, Y_LIM_B, Y_LIM_T)
-                fill_color = lighten_color(color1)
-
-            valid = np.isfinite(y1_fill) & np.isfinite(y2_fill)
-
-            # Рисуем штриховку реальными линиями
-            draw_fill_lines(ax, xf, y1_fill, y2_fill, valid, fill_style,
-                            fill_color, X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T,
-                            density=density, ax_px=(_ax_w_px, _ax_h_px))
-
-            # Площадь (интеграл): считается всегда — строка заливки показывает её
-            # рядом с галочкой; на графике подпись рисуется только с галочкой
-            if math.isfinite(full_from) and math.isfinite(full_to) and full_from < full_to:
-                f2_func_a = None if (isinstance(f2, str) or f2 is None) else func_data[f2][0]
-                meta1 = curve_meta[f1_idx] if f1_idx < len(curve_meta) else None
-                meta2 = (None if f2_func_a is None else
-                         (curve_meta[f2] if f2 < len(curve_meta) else None))
-                area, exact = fill_area(fi, f1_func, f2_func_a, full_from, full_to,
-                                        raw_from, raw_to, meta1, meta2)
-                if area is not None:
-                    LAST_FILL_AREAS[fi] = (area, exact if exact_is_readable(exact) else None) \
-                        if exact is not None else (area, None)
-                if show_area and area is not None and valid.any():
-                    xc = float(np.mean(xf[valid]))
-                    yc = float(np.mean((y1_fill[valid] + y2_fill[valid]) / 2.0))
-                    annotate_area(fi, xc, yc, area_label_text(area, exact), color1)
-
-            # Вертикальные линии-границы по краям
-            if show_borders:
-                for xb in [fx_from, fx_to]:
-                    y1b = _safe_val(f1_func, xb)
-                    y1b = float(np.clip(y1b, Y_LIM_B, Y_LIM_T)) if np.isfinite(y1b) else None
-                    if isinstance(f2, str) or f2 is None:
-                        y2b = 0.0
-                    else:
-                        y2b = _safe_val(func_data[f2][0], xb)
-                        y2b = float(np.clip(y2b, Y_LIM_B, Y_LIM_T)) if np.isfinite(y2b) else None
-                    if y1b is not None and y2b is not None:
-                        ax.plot([xb, xb], [y1b, y2b], color=fill_color,
-                                linewidth=1.2, zorder=5)
+                sx_, sy_ = entry[0], entry[1]
+                fill_style = int(entry[2]) if len(entry) > 2 else 0
+                density = float(entry[3]) if len(entry) > 3 else 0.01
+                show_area = bool(entry[4]) if len(entry) > 4 else True
+            if sx_ is None or sy_ is None:
+                continue
+            sx_, sy_ = float(sx_), float(sy_)
+            if not (math.isfinite(sx_) and math.isfinite(sy_)):
+                continue
+            if not _region_cache:
+                nx, ny, dx, dy = region_grid()
+                wall, ids, ids2 = build_region_walls(nx, ny, dx, dy)
+                _region_cache.update(nx=nx, ny=ny, dx=dx, dy=dy, wall=wall, ids=ids, ids2=ids2)
+            nx, ny, dx, dy = (_region_cache[k] for k in ('nx', 'ny', 'dx', 'dy'))
+            wall, ids, ids2 = (_region_cache[k] for k in ('wall', 'ids', 'ids2'))
+            j0 = int(math.floor((sx_ - X_LIM_L) / dx))
+            i0 = int(math.floor((sy_ - Y_LIM_B) / dy))
+            seed = _region_seed_cell(wall, i0, j0)
+            if seed is None:
+                continue
+            mask = _flood_region(~wall, seed[0], seed[1])
+            if mask is None or not mask.any():
+                continue
+            cut = bool(mask[0].any() or mask[-1].any() or mask[:, 0].any() or mask[:, -1].any())
+            _LAST_REGION.update(mask=mask, wall=wall, ids=ids, ids2=ids2, nx=nx, ny=ny, dx=dx, dy=dy)
+            base_color = region_color(mask, wall, ids, ids2)
+            draw_region_hatch(mask, fill_style, lighten_color(base_color), density, nx, ny, dx, dy)
+            area = region_area(mask, wall, ids, ids2, nx, ny, dx, dy)
+            exact = None
+            if not cut:
+                exact = region_exact(area, mask, ids, ids2, nx, ny, dx, dy)
+            if exact is not None and not exact_is_readable(exact):
+                exact = None
+            LAST_FILL_AREAS[fi] = (area, exact, cut)
+            if show_area:
+                c = _region_center(mask)
+                if c is not None:
+                    xc = X_LIM_L + (c[1] + 0.5) * dx
+                    yc = Y_LIM_B + (c[0] + 0.5) * dy
+                    annotate_area(fi, xc, yc, area_label_text(area, exact), base_color)
         except Exception:
             # Некорректная запись заливки не должна ронять график
-            logging.getLogger(__name__).debug("fill entry %r skipped", fill_entry, exc_info=True)
+            logging.getLogger(__name__).debug("fill entry %r skipped", entry, exc_info=True)
             continue
 
     LAST_CURVES[:] = list(curve_meta)

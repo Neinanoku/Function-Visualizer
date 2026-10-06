@@ -154,14 +154,26 @@ def curve_lines(ax):
 
 
 def hatch_lines(ax):
-    """Линии штриховки (стили 0/1): linewidth 0.6, без маркера."""
-    return [ln for ln in ax.lines
-            if abs(ln.get_linewidth() - 0.6) < 1e-9 and ln.get_marker() == 'None']
+    """Отрезки штриховки (стили 0/1): одна LineCollection на область, linewidth 0.6.
+    Возвращает список массивов (N, 2)."""
+    from matplotlib.collections import LineCollection
+    segs = []
+    for c in ax.collections:
+        if isinstance(c, LineCollection) and abs(float(c.get_linewidths()[0]) - 0.6) < 1e-9:
+            segs.extend(np.asarray(s, float) for s in c.get_segments())
+    return segs
 
 
 def hatch_dots(ax):
     """Точечная штриховка (стиль 2): маркер '.', linewidth 0."""
     return [ln for ln in ax.lines if ln.get_marker() == '.' and ln.get_linewidth() == 0]
+
+
+def region_points(ax):
+    """Все точки штриховки (линии и точки) как массив (N, 2)."""
+    pts = [s for s in hatch_lines(ax)]
+    pts += [np.column_stack((ln.get_xdata(), ln.get_ydata())) for ln in hatch_dots(ax)]
+    return np.concatenate(pts) if pts else np.zeros((0, 2))
 
 
 def n_callbacks(fig):
@@ -425,60 +437,89 @@ def test_empty_entries_skipped_with_stable_indices():
     assert [ln.get_color() for ln in curve_lines(res['ax'])] == \
         [fv.CURVE_COLORS[1], fv.CURVE_COLORS[3]]
 
-    # заливка между индексами 1 и 3 (x² и x) — индексы не «сползают»
-    res = draw(funcs, FILL=[(1, 3, -1, 1, 0)])
+    # область между x² (индекс 1) и x (индекс 3) - пустые строки индексов не сдвигают
+    res = draw(funcs, FILL=[fv.region_fill(0.5, 0.4)])
     assert res['errors'] == {}
-    hl = hatch_lines(res['ax'])
-    assert len(hl) >= 5
-    for ln in hl:
-        xs = np.asarray(ln.get_xdata(), float)
-        ys = np.asarray(ln.get_ydata(), float)
-        assert xs.min() >= -1 - 1e-9 and xs.max() <= 1 + 1e-9
-        assert np.all(ys >= np.minimum(xs ** 2, xs) - 1e-9)
-        assert np.all(ys <= np.maximum(xs ** 2, xs) + 1e-9)
+    pts = region_points(res['ax'])
+    assert len(pts) >= 50
+    xs, ys = pts[:, 0], pts[:, 1]
+    assert xs.min() >= -0.05 and xs.max() <= 1.05
+    assert np.all(ys >= xs ** 2 - 0.05) and np.all(ys <= xs + 0.05)
+    area, exact, cut = fv.LAST_FILL_AREAS[0]
+    assert area == pytest.approx(1 / 6, abs=2e-4) and str(exact) == "1/6" and not cut
 
-    # заливка от пустой строки — тихо пропускается
-    res = draw(funcs, FILL=[(0, 1, -1, 1, 0), (2, "x", -1, 1, 1)])
+    # точка без области (пустая запись) - тихо пропускается
+    res = draw(funcs, FILL=[{'x': None, 'y': None}, fv.region_fill(100.0, 0.0)])
     assert res['errors'] == {}
     assert hatch_lines(res['ax']) == []
+    assert fv.LAST_FILL_AREAS == {0: None, 1: None}
 
 
 @pytest.mark.parametrize("style", [0, 1, 2])
-def test_fill_styles_produce_hatching(style):
-    res = draw(["x^2", "x"], FILL=[(0, 1, -1, 1, style)])
+def test_region_styles_produce_hatching(style):
+    """Область над x² под y = 2 справа от оси Y: штриховка 45°/135° (одна
+    LineCollection) или точки (одна линия-маркер), все точки внутри области."""
+    res = draw(["x^2", "y=2"], FILL=[fv.region_fill(0.5, 1.0, style)])
     ax = res['ax']
     assert res['errors'] == {}
-    artists = hatch_dots(ax) if style == 2 else hatch_lines(ax)
-    assert len(artists) >= 5
     if style == 2:
-        assert hatch_lines(ax) == []
+        assert hatch_lines(ax) == [] and len(hatch_dots(ax)) == 1
     else:
-        assert hatch_dots(ax) == []
-    tol = 1e-9 if style != 2 else 0.01    # точки стоят на решётке между узлами сетки
-    n_pts = 0
-    for ln in artists:
-        xs = np.asarray(ln.get_xdata(), float)
-        ys = np.asarray(ln.get_ydata(), float)
-        n_pts += xs.size
-        assert xs.min() >= -1 - 1e-9 and xs.max() <= 1 + 1e-9
-        assert np.all(ys >= np.minimum(xs ** 2, xs) - tol)
-        assert np.all(ys <= np.maximum(xs ** 2, xs) + tol)
-    assert n_pts >= 50
-    # границы заливки x=-1 и x=1
-    borders = sorted(float(ln.get_xdata()[0]) for ln in ax.lines
-                     if abs(ln.get_linewidth() - 1.2) < 1e-9)
-    assert borders == [-1.0, 1.0]
+        assert hatch_dots(ax) == [] and len(hatch_lines(ax)) >= 5
+    pts = region_points(ax)
+    assert len(pts) >= 50
+    xs, ys = pts[:, 0], pts[:, 1]
+    tol = 0.05
+    assert xs.min() >= -tol and xs.max() <= math.sqrt(2) + tol
+    assert np.all(ys >= xs ** 2 - tol) and np.all(ys <= 2 + tol)
     assert len(curve_lines(ax)) == 2
+    area, exact, cut = fv.LAST_FILL_AREAS[0]
+    assert area == pytest.approx(4 * math.sqrt(2) / 3, abs=3e-4) and not cut
 
 
-def test_fill_to_x_axis():
-    res = draw(["x^2"], FILL=[(0, "x", -2, 2, 0)])
-    hl = hatch_lines(res['ax'])
-    assert len(hl) >= 5
-    for ln in hl:
-        xs = np.asarray(ln.get_xdata(), float)
-        ys = np.asarray(ln.get_ydata(), float)
-        assert np.all(ys >= -1e-9) and np.all(ys <= xs ** 2 + 1e-9)
+def test_region_boundaries_axes_and_window():
+    """Границы области: кривые, оси и края окна. Под x² справа от оси Y с x = 1 -
+    S = 1/3 точно; без вертикали область упирается в край окна (cut), подписи «S =» нет."""
+    fv.SYMBOLIC_MODE = 'compute'
+    res = draw(["x^2", "x=1"], FILL=[fv.region_fill(0.5, 0.1)])
+    area, exact, cut = fv.LAST_FILL_AREAS[0]
+    assert area == pytest.approx(1 / 3, abs=2e-4) and str(exact) == "1/3" and not cut
+    pts = region_points(res['ax'])
+    assert pts[:, 0].min() >= -0.05 and pts[:, 0].max() <= 1.05 and pts[:, 1].min() >= -0.05
+    labels = [t.get_text() for t in res['ax'].texts if t.get_text().startswith("S")]
+    assert labels == ["S = 1/3"]
+    # слева от оси Y - зеркальная область, та же площадь (ось Y - граница)
+    res = draw(["x^2", "x=-1"], FILL=[fv.region_fill(-0.5, 0.1)])
+    area, exact, cut = fv.LAST_FILL_AREAS[0]
+    assert area == pytest.approx(1 / 3, abs=2e-4) and str(exact) == "1/3"
+    # без вертикали: область до правого края окна
+    res = draw(["x^2"], FILL=[fv.region_fill(0.5, 0.1)])
+    area, exact, cut = fv.LAST_FILL_AREAS[0]
+    assert cut and exact is None and area > 1.0
+    labels = [t.get_text() for t in res['ax'].texts if t.get_text().startswith("S")]
+    assert labels and labels[0].startswith("S ≈")
+    # точка точно на оси - берётся ближайшая свободная ячейка; далеко за окном - области нет
+    res = draw(["x^2", "x=1"], FILL=[fv.region_fill(0.0, 0.5), fv.region_fill(50.0, 0.0)])
+    assert fv.LAST_FILL_AREAS[0] is not None and fv.LAST_FILL_AREAS[1] is None
+
+
+def test_region_implicit_and_vertical_boundaries():
+    """Неявные кривые как границы: сегмент круга над y = 2 делится осью Y пополам;
+    верхняя половина области между x = y² и x = 4 - численно 16/3 с точностью 1e-3."""
+    fv.SYMBOLIC_MODE = 'compute'
+    res = draw(["x^2+y^2=9", "y=2"], FILL=[fv.region_fill(1.0, 2.5), fv.region_fill(-1.0, 2.5, 1)])
+    assert res['errors'] == {}
+    half = (9 * math.acos(2 / 3) - 2 * math.sqrt(5)) / 2
+    for i in (0, 1):
+        area, exact, cut = fv.LAST_FILL_AREAS[i]
+        assert area == pytest.approx(half, rel=1e-3) and not cut
+    pts = region_points(res['ax'])
+    assert np.all(pts[:, 1] >= 2 - 0.05) and np.all(pts[:, 0] ** 2 + pts[:, 1] ** 2 <= 9.2)
+    res = draw(["x=y^2", "x=4"], FILL=[fv.region_fill(2.0, 0.5, 2)])
+    area, exact, cut = fv.LAST_FILL_AREAS[0]
+    assert area == pytest.approx(16 / 3, rel=1e-3) and not cut
+    pts = region_points(res['ax'])
+    assert np.all(pts[:, 1] >= -0.05) and np.all(pts[:, 0] <= 4.05) and np.all(pts[:, 1] ** 2 <= pts[:, 0] + 0.1)
 
 
 # ═════════════════════════════════════════════════════════════
@@ -864,28 +905,27 @@ def test_edge_ticks_quarter_step_rule():
         fv.EXTEND_TO_CANVAS = True
 
 
-def test_fill_area_label():
-    """Число площади у заливки: точное «S = 1/3» для ∫₀¹ x² dx, численное при смене знака, без галочки — нет."""
+def test_region_area_label():
+    """Число площади области: точная форма для «школьных» областей (синус над осью:
+    S = 2, 1/x между x = 1 и x = 2: ln 2, √x до x = 4: 5 1/3), без галочки подписи нет,
+    но площадь посчитана (для строки области)."""
     fig = Figure(figsize=(8, 6), dpi=100)
     FigureCanvasAgg(fig)
     fv.SYMBOLIC_MODE = 'compute'
-    # f0 = x², заливка до оси X на [0, 1], площадь показывать
-    res = draw(["x^2"], fig=fig, FILL=[(0, "x", 0.0, 1.0, 0, True, 0.02, True, "0", "1")])
+    res = draw(["sin(x)"], fig=fig, FILL=[fv.region_fill(1.5, 0.3)])
     labels = [t.get_text() for t in res['ax'].texts if t.get_text().startswith("S")]
-    assert labels and ("1/3" in labels[0]), labels
-    # разность меняет знак (x на [-1, 1]) — только численно: ∫|x| = 1
-    res = draw(["x"], fig=fig, FILL=[(0, "x", -1.0, 1.0, 0, True, 0.02, True, "-1", "1")])
+    assert labels == ["S = 2"], labels
+    res = draw(["1/x", "x=1", "x=2"], fig=fig, FILL=[fv.region_fill(1.5, 0.3)])
+    area, exact, cut = fv.LAST_FILL_AREAS[0]
+    assert area == pytest.approx(math.log(2), abs=2e-4) and str(exact) == "log(2)"
+    res = draw(["sqrt(x)", "x=4"], fig=fig, FILL=[fv.region_fill(2.0, 0.5)])
     labels = [t.get_text() for t in res['ax'].texts if t.get_text().startswith("S")]
-    assert labels and "≈" in labels[0] and "1" in labels[0], labels
-    # между двумя функциями: x² и x на [0, 1] → 1/6
-    res = draw(["x^2", "x"], fig=fig, FILL=[(0, 1, 0.0, 1.0, 0, True, 0.02, True, "0", "1")])
-    labels = [t.get_text() for t in res['ax'].texts if t.get_text().startswith("S")]
-    assert labels and "1/6" in labels[0], labels
-    # галочка снята — подписи нет, но площадь посчитана (для строки заливки)
-    res = draw(["x^2"], fig=fig, FILL=[(0, "x", 0.0, 1.0, 0, True, 0.02, False, "0", "1")])
+    assert labels == ["S = 5 1/3"], labels
+    # галочка снята - подписи нет, но площадь посчитана
+    res = draw(["x^2", "x=1"], fig=fig, FILL=[fv.region_fill(0.5, 0.1, 0, 0.02, False)])
     assert not [t for t in res['ax'].texts if t.get_text().startswith("S")]
-    area, exact = fv.LAST_FILL_AREAS[0]
-    assert area == pytest.approx(1 / 3, abs=1e-4) and str(exact) == "1/3"
+    area, exact, cut = fv.LAST_FILL_AREAS[0]
+    assert area == pytest.approx(1 / 3, abs=2e-4) and str(exact) == "1/3"
     assert fv.area_text_plain(area, exact) == "S = 1/3"
     assert fv.area_text_plain(2.3456, None) == "S ≈ 2.346"
 
@@ -914,19 +954,33 @@ def test_exact_readability_and_mixed_numbers():
     assert not any("141" in t for t in texts), texts
 
 
-def test_hidden_function_keeps_fill():
-    """Скрытая глазком функция: кривой и подписей нет, заливка под ней остаётся, пересечения не считаются."""
+def test_hidden_curves_stay_region_boundaries():
+    """Скрытая глазком кривая (функция, вертикаль, неявная): не рисуется, в пересечениях
+    не участвует, но остаётся границей области - штриховка и площадь не меняются."""
     fig = Figure(figsize=(8, 6), dpi=100)
     FigureCanvasAgg(fig)
+    fv.SYMBOLIC_MODE = 'compute'
     try:
         fv.CURVE_HIDDEN = {0}
-        res = draw(["x^2", "x"], fig=fig, FILL=[(0, "x", 0.0, 1.0, 0, True, 0.02, True, "0", "1")], INTER=True)
+        res = draw(["x^2", "x"], fig=fig, FILL=[fv.region_fill(0.5, 0.4)], INTER=True)
         ax = res['ax']
-        long_lines = [l for l in ax.lines if len(l.get_xdata()) > 1000]
-        assert len(long_lines) == 1                                 # только f1 = x нарисована
-        assert any(t.get_text().startswith(("S", "$S")) for t in ax.texts)   # площадь под скрытой x² есть
+        assert len(curve_lines(ax)) == 1                            # только f1 = x нарисована
+        area, exact, cut = fv.LAST_FILL_AREAS[0]
+        assert str(exact) == "1/6"                                  # x² скрыта, но ограничивает область
         assert fv.LAST_CURVES[0].get('hidden') and fv.LAST_CURVES[0]['kind'] == 'func'
         assert not any("(1, 1)" in t.get_text() for t in ax.texts)  # пересечение со скрытой не подписано
+        fv.CURVE_HIDDEN = {2}
+        res = draw(["x^2", "x", "x=1"], fig=fig, FILL=[fv.region_fill(0.5, 0.1)])
+        assert fv.LAST_CURVES[2].get('hidden') and fv.LAST_CURVES[2]['kind'] == 'vline'
+        assert not [l for l in res['ax'].lines if list(l.get_xdata()) == [1.0, 1.0]]
+        assert str(fv.LAST_FILL_AREAS[0][1]) == "1/3"
+        fv.CURVE_HIDDEN = {0}
+        res = draw(["x^2+y^2=9", "y=2"], fig=fig, FILL=[fv.region_fill(1.0, 2.5)])
+        assert fv.LAST_CURVES[0].get('hidden') and fv.LAST_CURVES[0]['kind'] == 'implicit'
+        assert not res['ax'].collections or all(getattr(c, 'get_linewidths', lambda: [0.6])()[0] == 0.6
+                                                for c in res['ax'].collections)
+        half = (9 * math.acos(2 / 3) - 2 * math.sqrt(5)) / 2
+        assert fv.LAST_FILL_AREAS[0][0] == pytest.approx(half, rel=1e-3)
     finally:
         fv.CURVE_HIDDEN = set()
 

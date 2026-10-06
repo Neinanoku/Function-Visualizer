@@ -288,9 +288,15 @@ STRINGS_HE = {
     "X-intercepts": "חיתוך עם X", "Y-intercepts": "חיתוך עם Y", "Intersections": "חיתוך בין פונקציות",
     "Show values": "הצגת ערכים", "Hide X labels": "הסתר תוויות X", "Hide Y labels": "הסתר תוויות Y",
     "Label size:": "גודל תווית:",
-    "Area Fill": "צביעת שטח", "+ Add fill": "+ הוסף צביעה",
-    "f1 / f2 - function indices (0, 1, …) or 'x' for the X axis":
-        "f1 / f2 - אינדקסי פונקציות (0, 1, …) או 'x' עבור ציר X",
+    "Area Fill": "צביעת שטח", "+ Add region": "+ הוסף אזור",
+    'Press "+ Add region", then click inside the area on the graph. '
+    'Its boundaries are the curves (hidden ones too), the axes and the window edges.':
+        'לחץ על "+ הוסף אזור", ואז לחץ בתוך האזור על הגרף. '
+        'גבולותיו הם העקומות (גם המוסתרות), הצירים וקצות החלון.',
+    "point:": "נקודה:", "Pick": "בחר",
+    "Click inside the area on the graph (Esc to cancel)": "לחץ בתוך האזור על הגרף (Esc לביטול)",
+    "click inside an area on the graph": "לחץ בתוך אזור על הגרף",
+    "no area at this point": "אין אזור בנקודה זו", "to window edge": "עד קצה החלון",
     "Graph Labels": "תוויות על הגרף",
     "Parameters": "פרמטרים",
     "parameter a - a slider appears in the Parameters card": "פרמטר a - מחוון יופיע בכרטיס הפרמטרים",
@@ -323,7 +329,7 @@ STRINGS_HE = {
     # строки функции / заливки
     "w:": "עובי:", "domain:": "תחום:", "Solid": "רציף", "Dashed": "מקווקו", "Dotted": "נקודות",
     "Pick color for f{idx}": "בחר צבע עבור f{idx}",
-    "from:": "מ:", "to:": "עד:", "style:": "סגנון:", "borders": "קצוות", "density:": "צפיפות:",
+    "style:": "סגנון:", "density:": "צפיפות:",
     "area value": "ערך השטח", "Hide function": "הסתר פונקציה", "Show function": "הצג פונקציה",
     "45deg ////": "45° ////", "135deg \\\\": "135° \\\\", "Dots ....": "נקודות ....",
     # диалоги
@@ -353,7 +359,7 @@ STRINGS_HE = {
     "View window: left < right and bottom < top required": "חלון תצוגה: נדרש שמאל < ימין ותחתון < עליון",
     "Grid step must be a positive finite number": "צעד הסריג חייב להיות מספר חיובי סופי",
     "Grid step is too small for this view window": "צעד הסריג קטן מדי עבור חלון תצוגה זה",
-    "Fill #{n}: check parameters": "צביעה #{n}: בדוק פרמטרים",
+    "Region #{n}: check the point": "אזור #{n}: בדוק את הנקודה",
     # подсказки клавиатуры
     "variable x": "משתנה x", "variable y (for equations, e.g. x²+y²=9)": "משתנה y (למשוואות, למשל x²+y²=9)",
     "square": "ריבוע", "power": "חזקה", "open parenthesis": "פתח סוגריים",
@@ -422,9 +428,15 @@ STRINGS_RU = {
     "Intersections": "Пересечения функций",
     "Show values": "Показывать значения", "Hide X labels": "Скрыть подписи X", "Hide Y labels": "Скрыть подписи Y",
     "Label size:": "Размер подписей:",
-    "Area Fill": "Заливка области", "+ Add fill": "+ Добавить заливку",
-    "f1 / f2 - function indices (0, 1, …) or 'x' for the X axis":
-        "f1 / f2 - номера функций (0, 1, …) или 'x' для оси X",
+    "Area Fill": "Заливка области", "+ Add region": "+ Добавить область",
+    'Press "+ Add region", then click inside the area on the graph. '
+    'Its boundaries are the curves (hidden ones too), the axes and the window edges.':
+        'Нажмите «+ Добавить область», затем щёлкните внутри области на графике. '
+        'Её границы: кривые (в том числе скрытые), оси и края окна.',
+    "point:": "точка:", "Pick": "Указать",
+    "Click inside the area on the graph (Esc to cancel)": "Щёлкните внутри области на графике (Esc для отмены)",
+    "click inside an area on the graph": "щёлкните внутри области на графике",
+    "no area at this point": "в этой точке нет области", "to window edge": "до края окна",
     "Graph Labels": "Подписи на графике",
     "Parameters": "Параметры",
     "parameter a - a slider appears in the Parameters card": "параметр a - ползунок появится в карточке «Параметры»",
@@ -457,7 +469,7 @@ STRINGS_RU = {
     # строки функции / заливки
     "w:": "толщ.:", "domain:": "ОДЗ:", "Solid": "Сплошная", "Dashed": "Штриховая", "Dotted": "Пунктир",
     "Pick color for f{idx}": "Цвет для f{idx}",
-    "from:": "от:", "to:": "до:", "style:": "стиль:", "borders": "границы", "density:": "плотность:",
+    "style:": "стиль:", "density:": "плотность:",
     "area value": "площадь", "Hide function": "Скрыть функцию", "Show function": "Показать функцию",
     "45deg ////": "45° ////", "135deg \\\\": "135° \\\\", "Dots ....": "Точки ....",
     # диалоги
@@ -488,7 +500,7 @@ STRINGS_RU = {
         "Окно просмотра: нужно левая < правая и нижняя < верхняя",
     "Grid step must be a positive finite number": "Шаг сетки должен быть положительным конечным числом",
     "Grid step is too small for this view window": "Шаг сетки слишком мал для этого окна просмотра",
-    "Fill #{n}: check parameters": "Заливка №{n}: проверьте параметры",
+    "Region #{n}: check the point": "Область №{n}: проверьте точку",
     # подсказки клавиатуры
     "variable x": "переменная x", "variable y (for equations, e.g. x²+y²=9)": "переменная y (для уравнений, напр. x²+y²=9)",
     "square": "квадрат", "power": "степень", "open parenthesis": "открыть скобку",
@@ -1346,9 +1358,11 @@ class ParamRow:
 # ═════════════════════════════════════════════════════════════
 
 class FillRow:
+    """Область заливки: точка внутри неё (щелчок по графику или ввод), стиль и
+    плотность штриховки, галочка подписи площади и текущее значение площади."""
     STYLES = ["45deg ////", "135deg \\\\\\\\", "Dots ...."]
 
-    def __init__(self, parent, on_delete, on_change):
+    def __init__(self, parent, on_delete, on_change, on_pick):
         self.frame = tk.Frame(parent, bg=PANEL_BG)
         self.frame.pack(fill="x", padx=4, pady=3)
 
@@ -1357,14 +1371,11 @@ class FillRow:
         def lbl(t, parent=None):
             make_label(parent or self.frame, t, size=9, bg=PANEL_BG).pack(side=S, padx=(4, 1))
 
-        lbl("f1:")
-        self.f1 = live_entry(self.frame, 3, "0", on_change); self.f1.pack(side=S)
-        lbl("f2:")
-        self.f2 = live_entry(self.frame, 4, "x", on_change); self.f2.pack(side=S)
-        lbl("from:")
-        self.x_from = live_entry(self.frame, 6, "-3", on_change); self.x_from.pack(side=S)
-        lbl("to:")
-        self.x_to = live_entry(self.frame, 6, "3", on_change); self.x_to.pack(side=S)
+        lbl("point:")
+        self.x_e = live_entry(self.frame, 7, "", on_change); self.x_e.pack(side=S)
+        self.y_e = live_entry(self.frame, 7, "", on_change); self.y_e.pack(side=S, padx=(2, 0))
+        self.pick_btn = small_button(self.frame, "Pick", lambda: on_pick(self), bg=BTN_BLUE, padx=6, pady=1)
+        self.pick_btn.pack(side=S, padx=4)
 
         lbl("style:")
         self._style_names = [he_display(T(x)) for x in self.STYLES]
@@ -1382,13 +1393,9 @@ class FillRow:
                   relief="flat", font=(UI_FONT, 9, "bold"), cursor="hand2", bd=0, padx=6,
                   command=lambda: on_delete(self)).pack(side=S2, padx=(10, 4))
 
-        # вторая строка: границы + плотность
+        # вторая строка: плотность + площадь
         self.frame2 = tk.Frame(parent, bg=PANEL_BG)
         self.frame2.pack(fill="x", padx=4, pady=(0, 3))
-
-        self.borders_var = tk.IntVar(value=1)
-        self.borders_var.trace_add("write", lambda *_: on_change())
-        make_check(self.frame2, "borders", self.borders_var, bg=PANEL_BG).pack(side=S, padx=4)
 
         lbl("density:", self.frame2)
         self.density_var = tk.IntVar(value=100)
@@ -1403,64 +1410,85 @@ class FillRow:
             on_change()
 
         tk.Scale(self.frame2, from_=0, to=100, orient="horizontal",
-                 variable=self.density_var, length=_px(110), resolution=5,
+                 variable=self.density_var, length=_px(90), resolution=5,
                  bg=CARD_BG, fg=TEXT, troughcolor=ACCENT, activebackground=BTN_DEL,
                  highlightthickness=0, bd=0, sliderrelief="flat", showvalue=False,
                  command=_on_density, font=(UI_FONT, 7)).pack(side=S)
         self._density_ind.pack(side=S, padx=(4, 0))
 
-        # Число площади (интеграл) рядом со штриховкой
+        # Число площади рядом со штриховкой
         self.area_var = tk.IntVar(value=1)
         self.area_var.trace_add("write", lambda *_: on_change())
         make_check(self.frame2, "area value", self.area_var, bg=PANEL_BG).pack(side=S, padx=(10, 2))
-        # Текущая площадь — видна всегда, независимо от галочки (латиница/цифры:
-        # обычный Label, слева направо в любом языке)
+        # Текущая площадь (или подсказка) - видна всегда, независимо от галочки
         self._area_text = tk.Label(self.frame2, text="", bg=PANEL_BG, fg=SUBTEXT, font=(UI_FONT, 9))
         self._area_text.pack(side=S, padx=(0, 4))
+        self.set_area(None)
+
+    @staticmethod
+    def _fmt(v):
+        s = "%.6g" % v
+        return s if "e" not in s else repr(round(float(v), 6))
+
+    def has_point(self):
+        return bool(self.x_e.get().strip() or self.y_e.get().strip())
+
+    def set_point(self, x, y):
+        """Точка внутри области (щелчок по графику)."""
+        self.x_e.var.set(self._fmt(x))
+        self.y_e.var.set(self._fmt(y))
 
     def set_area(self, value):
-        """value — (число, точная форма | None) из движка или None."""
-        try:
-            txt = "(" + fv.area_text_plain(value[0], value[1]) + ")" if value else ""
-        except Exception:
-            txt = ""
-        self._area_text.config(text=txt)
+        """value: (площадь, точная форма | None, упирается ли в край окна) из движка
+        или None, если области у точки нет."""
+        if not self.has_point():
+            txt = T("click inside an area on the graph")
+        elif value is None:
+            txt = T("no area at this point")
+        else:
+            try:
+                area, exact, cut = value
+                txt = fv.area_text_plain(area, exact)
+                if cut:
+                    txt += ", " + T("to window edge")
+            except Exception:
+                txt = ""
+        txt = "(" + txt + ")" if txt else ""
+        self._area_text.config(text=he_display(txt), font=ui_font(txt, 9))
 
     def get(self):
-        """Returns tuple (f1, f2, x_from, x_to, style, borders, density, show_area, from_str, to_str) or None on error."""
+        """dict для движка (x, y = None, пока точка не выбрана) или None при ошибке ввода."""
         try:
-            f1 = int(self.f1.get().strip())
-            f2_raw = self.f2.get().strip()
-            f2 = f2_raw if f2_raw.lower() in ("x", "") else int(f2_raw)
-            x_from  = fv.parse_number(self.x_from.get())
-            x_to    = fv.parse_number(self.x_to.get())
-            style   = self._style_names.index(self.style_var.get())
-            borders = bool(self.borders_var.get())
+            style = self._style_names.index(self.style_var.get())
             # density: 0%→step=0.05 (редко),  100%→step=0.01 (густо)
-            pct     = self.density_var.get() / 100.0
+            pct = self.density_var.get() / 100.0
             density = 0.05 - pct * 0.04
-            return (f1, f2, x_from, x_to, style, borders, density, bool(self.area_var.get()),
-                    self.x_from.get().strip(), self.x_to.get().strip())
+            xs, ys = self.x_e.get().strip(), self.y_e.get().strip()
+            if not xs and not ys:
+                x = y = None
+            else:
+                x = fv.parse_number(xs)
+                y = fv.parse_number(ys)
+                if not (math.isfinite(x) and math.isfinite(y)):
+                    return None
+            return {"x": x, "y": y, "style": style, "density": density, "area": bool(self.area_var.get())}
         except Exception:
             return None
 
     def to_dict(self):
-        return {"f1": self.f1.get(), "f2": self.f2.get(), "from": self.x_from.get(),
-                "to": self.x_to.get(), "style": self.STYLES[self._style_names.index(self.style_var.get())],
-                "borders": self.borders_var.get(), "density": self.density_var.get(),
-                "area": self.area_var.get()}
+        return {"x": self.x_e.get(), "y": self.y_e.get(),
+                "style": self.STYLES[self._style_names.index(self.style_var.get())],
+                "density": self.density_var.get(), "area": self.area_var.get()}
 
     def from_dict(self, d):
-        self.f1.var.set(str(d.get("f1", "0")))
-        self.f2.var.set(str(d.get("f2", "x")))
-        self.x_from.var.set(str(d.get("from", "-3")))
-        self.x_to.var.set(str(d.get("to", "3")))
+        self.x_e.var.set(str(d.get("x", "")))
+        self.y_e.var.set(str(d.get("y", "")))
         if d.get("style") in self.STYLES:
             self.style_var.set(self._style_names[self.STYLES.index(d["style"])])
-        self.borders_var.set(int(d.get("borders", 1)))
         self.density_var.set(int(d.get("density", 100)))
         self._density_ind.config(text=str(self.density_var.get()))
         self.area_var.set(int(d.get("area", 1)))
+        self.set_area(None)
 
     def destroy(self):
         self.frame.destroy()
@@ -2156,6 +2184,7 @@ class App(tk.Tk):
         self._redraw_wanted = False
         self._loading = False
         self._pan = None
+        self._pick_row = None             # строка области, ждущая щелчка по графику
         self._zoom = None                 # сессия зума колесом: {'px','py','scale'}
         self._tl_job = None
         # Отмена/повтор: снимки состояния проекта (JSON); _state_current —
@@ -2196,6 +2225,7 @@ class App(tk.Tk):
         self._add_func()
         self._setup_clipboard_shortcuts()
         self._bind_undo_keys()
+        self._bind_escape()
         self._connect_graph_events()
         self._start_worker_thread()
 
@@ -2447,11 +2477,14 @@ class App(tk.Tk):
         # ── Fill ─────────────────────────────────────────────
         self.fill_card = card(p, "Area Fill")
         card_pack(self.fill_card, fill="x", padx=12, pady=4)
-        make_label(self.fill_card, "f1 / f2 - function indices (0, 1, …) or 'x' for the X axis",
-                   size=8, bg=CARD_BG).pack(anchor=anchor_start(), padx=10)
+        make_paragraph(self.fill_card,
+                       T('Press "+ Add region", then click inside the area on the graph. '
+                         'Its boundaries are the curves (hidden ones too), the axes and the window edges.'),
+                       size=8, color=SUBTEXT, bg=CARD_BG,
+                       width_px=_px(LEFT_PANEL_WIDTH - 60)).pack(anchor=anchor_start(), fill="x", padx=10)
         self.fill_list = tk.Frame(self.fill_card, bg=PANEL_BG)
         self.fill_list.pack(fill="x", padx=8, pady=4)
-        small_button(self.fill_card, "+ Add fill", self._add_fill,
+        small_button(self.fill_card, "+ Add region", self._add_region,
                      bg=BTN_BLUE).pack(anchor=anchor_start(), padx=10, pady=(0, 8))
 
         # ── Graph Labels ─────────────────────────────────────
@@ -2622,15 +2655,42 @@ class App(tk.Tk):
         self.schedule_redraw()
 
     def _add_fill(self):
-        row = FillRow(self.fill_list, self._del_fill, on_change=self.schedule_redraw)
+        row = FillRow(self.fill_list, self._del_fill, on_change=self.schedule_redraw,
+                      on_pick=self._start_pick)
         self.fill_rows.append(row)
         self.schedule_redraw()
         return row
 
+    def _add_region(self):
+        """Кнопка «+ Добавить область»: новая строка и ожидание щелчка по графику."""
+        self._start_pick(self._add_fill())
+
     def _del_fill(self, row):
+        if self._pick_row is row:
+            self._end_pick()
         row.destroy()
         self.fill_rows.remove(row)
         self.schedule_redraw()
+
+    # ── выбор точки области щелчком по графику ──
+    def _start_pick(self, row):
+        self._pick_row = row
+        try:
+            self.canvas.get_tk_widget().config(cursor="crosshair")
+        except Exception:
+            pass
+        self._set_status(T("Click inside the area on the graph (Esc to cancel)"), BTN_BLUE)
+
+    def _end_pick(self, cancelled=False):
+        if self._pick_row is None:
+            return
+        self._pick_row = None
+        try:
+            self.canvas.get_tk_widget().config(cursor="")
+        except Exception:
+            pass
+        if cancelled:
+            self._set_status(T("Ready"))
 
     # ══════════════════════════════════════════════════════════
     #  ЖИВАЯ ПЕРЕРИСОВКА
@@ -2707,7 +2767,7 @@ class App(tk.Tk):
         for i, fr in enumerate(self.fill_rows):
             entry = fr.get()
             if entry is None:
-                raise ValueError(T("Fill #{n}: check parameters", n=i + 1))
+                raise ValueError(T("Region #{n}: check the point", n=i + 1))
             fills.append(entry)
 
         return dict(funcs=funcs, colors=colors, widths=widths, styles=styles, domains=domains,
@@ -2837,7 +2897,7 @@ class App(tk.Tk):
             elif errors or self._incomplete_rows:
                 self._set_status(T("Some functions are incomplete or invalid - hover the red field"),
                                  ERR_COLOR)
-            else:
+            elif self._pick_row is None:
                 self._set_status(T("Ready") + self._visible_range_note(result.get('ax')))
         finally:
             self._drawing = False
@@ -2921,6 +2981,10 @@ class App(tk.Tk):
                            bg=BTN_DEL if stack else BORDER)
             except Exception:
                 pass
+
+    def _bind_escape(self):
+        """Esc отменяет ожидание щелчка по графику (выбор точки области)."""
+        self.bind_all("<Escape>", lambda _e: self._end_pick(cancelled=True), add="+")
 
     def _bind_undo_keys(self):
         def handler(event):
@@ -3183,6 +3247,16 @@ class App(tk.Tk):
     def _on_graph_press(self, event):
         self._pan = None
         self._probe_candidate = None
+        if self._pick_row is not None:
+            # ожидаем точку области: левая кнопка - выбрать, правая - отменить
+            row = self._pick_row
+            if event.button == 1 and event.inaxes is not None and event.xdata is not None:
+                self._end_pick()
+                if row in self.fill_rows:
+                    row.set_point(event.xdata, event.ydata)
+            elif event.button == 3:
+                self._end_pick(cancelled=True)
+            return
         if event.inaxes is None:
             return
         lab = self.probe.hit_label(event)
@@ -3448,6 +3522,33 @@ class App(tk.Tk):
         except Exception as ex:
             messagebox.showerror(he_display(T("Open error")), he_display(T("Cannot open project:\n{err}", err=ex)))
 
+    def _convert_fill(self, fd):
+        """Заливка из проекта прежних версий (f1/f2/from/to) → точка внутри области:
+        середина отрезка по X, посередине между кривыми по Y."""
+        if "x" in fd or "f1" not in fd:
+            return fd
+        out = {k: v for k, v in fd.items() if k in ("style", "density", "area")}
+        out["x"], out["y"] = "", ""
+        try:
+            a = fv.parse_number(str(fd.get("from", "-3")))
+            b = fv.parse_number(str(fd.get("to", "3")))
+            xm = (a + b) / 2.0
+
+            def val(key):
+                raw = str(fd.get(key, "x")).strip()
+                if raw.lower() in ("x", ""):
+                    return 0.0
+                f = fv.build_numpy_func(self.func_rows[int(raw)].get())[2]
+                return float(fv._eval_array(f, np.array([xm]))[0])
+
+            y1, y2 = val("f1"), val("f2")
+            if math.isfinite(xm) and math.isfinite(y1) and math.isfinite(y2):
+                out["x"] = FillRow._fmt(xm)
+                out["y"] = FillRow._fmt((y1 + y2) / 2.0)
+        except Exception:
+            pass
+        return out
+
     def load_project(self, data):
         self._loading = True
         try:
@@ -3464,7 +3565,7 @@ class App(tk.Tk):
             if not self.func_rows:
                 self._add_func()
             for fd in data.get("fills", []):
-                self._add_fill().from_dict(fd)
+                self._add_fill().from_dict(self._convert_fill(fd))
             # Параметры: строки создаются при следующем _collect по формулам;
             # сохранённые значения подхватываются оттуда
             self._param_saved = dict(data.get("params", {}) or {})
@@ -3540,7 +3641,7 @@ class App(tk.Tk):
 #  ВЫБОР ЯЗЫКА ПРИ ЗАПУСКЕ
 # ═════════════════════════════════════════════════════════════
 
-VERSION = "4.3.1"
+VERSION = "4.4"
 
 # (код, название на самом языке, клавиша)
 LANGUAGES = [("en", "English", "1"), ("he", "עברית", "2"), ("ru", "Русский", "3")]

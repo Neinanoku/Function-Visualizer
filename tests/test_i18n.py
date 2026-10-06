@@ -85,7 +85,7 @@ def test_tables_have_same_keys():
 def test_russian_lookup(monkeypatch):
     monkeypatch.setattr(app, "LANG", "ru")
     assert app.T("Ready") == "Готово"
-    assert app.T("Fill #{n}: check parameters", n=2) == "Заливка №2: проверьте параметры"
+    assert app.T("Region #{n}: check the point", n=2) == "Область №2: проверьте точку"
     assert app.T("no such key") == "no such key"
     assert app.tr_err("empty denominator") == "пустой знаменатель"
     assert app.tr_err("trailing operator in numerator") == "числитель: оператор в конце"
