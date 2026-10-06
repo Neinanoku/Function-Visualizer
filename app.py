@@ -257,6 +257,7 @@ STRINGS_HE = {
         "ריחוף מעל עקומה מציג נקודה; לחיצה מקבעת אותה, גרירה מזיזה לאורך העקומה, "
         "לחיצה ימנית מוחקת.",
     "  Save image…": "שמור תמונה…", "Reset view": "איפוס תצוגה",
+    "↶ Undo": "↶ בטל", "↷ Redo": "↷ בצע שוב",
     "Save project": "שמור פרויקט", "Open project": "פתח פרויקט",
     # строки функции / заливки
     "w:": "עובי:", "domain:": "תחום:", "Solid": "רציף", "Dashed": "מקווקו", "Dotted": "נקודות",
@@ -379,6 +380,7 @@ STRINGS_RU = {
         "Наведите на кривую, чтобы увидеть точку; щелчок закрепляет её, перетаскивание двигает "
         "вдоль кривой, правая кнопка удаляет.",
     "  Save image…": "  Сохранить картинку…", "Reset view": "Сбросить вид",
+    "↶ Undo": "↶ Отменить", "↷ Redo": "↷ Повторить",
     "Save project": "Сохранить проект", "Open project": "Открыть проект",
     # строки функции / заливки
     "w:": "толщ.:", "domain:": "ОДЗ:", "Solid": "Сплошная", "Dashed": "Штриховая", "Dotted": "Пунктир",
@@ -1855,6 +1857,13 @@ class App(tk.Tk):
         self._pan = None
         self._zoom = None                 # сессия зума колесом: {'px','py','scale'}
         self._tl_job = None
+        # Отмена/повтор: снимки состояния проекта (JSON); _state_current —
+        # последнее известное состояние, _state_sync — после undo/redo/open
+        # следующий снимок просто запоминается, не становясь шагом.
+        self._undo, self._redo = [], []
+        self._state_current = None
+        self._state_sync = True
+        self._state_last_push = 0.0
         self._incomplete_rows = 0
         self._preview = None              # FramePreview (создаётся после холста)
         self._last_good = None            # последние настройки, которые построились без ошибок
@@ -1883,6 +1892,7 @@ class App(tk.Tk):
         self._build_ui()
         self._add_func()
         self._setup_clipboard_shortcuts()
+        self._bind_undo_keys()
         self._connect_graph_events()
         self._start_worker_thread()
 
@@ -2171,6 +2181,13 @@ class App(tk.Tk):
                      font=(UI_FONT, 11, "bold"), padx=16, pady=7).pack(side=side())
         small_button(bar, "Reset view", self._reset_view, bg=BTN_DEL,
                      pady=7).pack(side=side(), padx=(8, 0))
+        self._undo_btn = small_button(bar, "↶ Undo", self.undo, bg=BTN_DEL, pady=7)
+        self._undo_btn.pack(side=side(), padx=(8, 0))
+        self._redo_btn = small_button(bar, "↷ Redo", self.redo, bg=BTN_DEL, pady=7)
+        self._redo_btn.pack(side=side(), padx=(4, 0))
+        Tooltip(self._undo_btn, "Ctrl+Z")
+        Tooltip(self._redo_btn, "Ctrl+Y")
+        self._update_undo_buttons()
         small_button(bar, "Open project", self._open_project, bg=BTN_BLUE,
                      pady=7).pack(side=oside())
         small_button(bar, "Save project", self._save_project, bg=BTN_BLUE,
@@ -2196,6 +2213,7 @@ class App(tk.Tk):
         self._preview = FramePreview(self.canvas)
         self.probe = Probe(self)
         fv.PRESS_HIT_HOOK = lambda ev: self.probe.hit_pin(ev) is not None
+        fv.STATE_CHANGED_HOOK = self._record_state
 
         # Строка состояния. В иврите и русском текст собирается из фрагментов
         # (местный шрифт + UI_FONT для цифр) в status_box; self.status (Label)
@@ -2440,6 +2458,7 @@ class App(tk.Tk):
             return
         self._drawing = True
         try:
+            self._record_state()
             try:
                 settings = self._collect()
             except ValueError as ex:
@@ -2493,6 +2512,97 @@ class App(tk.Tk):
             if self._redraw_wanted and self._pan is None:
                 self._redraw_wanted = False
                 self.schedule_redraw()
+
+    # ── отмена / повтор ──────────────────────────────────────
+    UNDO_MERGE_SEC = 0.9        # изменения чаще этого сливаются в один шаг
+    UNDO_LIMIT = 100
+
+    def _snapshot(self):
+        try:
+            return json.dumps(self._project_dict(), sort_keys=True, ensure_ascii=False)
+        except Exception:
+            return None
+
+    def _record_state(self):
+        """Запоминает шаг отмены, если состояние изменилось (вызывается перед
+        каждой перерисовкой и из движка после действий мышью)."""
+        if self._loading:
+            return
+        snap = self._snapshot()
+        if snap is None:
+            return
+        if self._state_sync or self._state_current is None:
+            self._state_current = snap
+            self._state_sync = False
+            self._update_undo_buttons()
+            return
+        if snap == self._state_current:
+            return
+        now = time.time()
+        if now - self._state_last_push > self.UNDO_MERGE_SEC:
+            self._undo.append(self._state_current)
+            del self._undo[:-self.UNDO_LIMIT]
+            self._redo.clear()
+        self._state_last_push = now
+        self._state_current = snap
+        self._update_undo_buttons()
+
+    def _apply_state(self, snap):
+        self._state_sync = True
+        self._state_current = snap
+        self.load_project(json.loads(snap))
+        self._state_last_push = 0.0
+
+    def undo(self, _event=None):
+        if not self._drawing:
+            self._record_state()            # незаписанные изменения — отдельный шаг
+        if not self._undo:
+            return "break"
+        cur = self._snapshot()
+        prev = self._undo.pop()
+        if cur is not None:
+            self._redo.append(cur)
+        self._apply_state(prev)
+        self._update_undo_buttons()
+        return "break"
+
+    def redo(self, _event=None):
+        if not self._redo:
+            return "break"
+        cur = self._snapshot()
+        nxt = self._redo.pop()
+        if cur is not None:
+            self._undo.append(cur)
+        self._apply_state(nxt)
+        self._update_undo_buttons()
+        return "break"
+
+    def _update_undo_buttons(self):
+        for btn, stack in ((getattr(self, "_undo_btn", None), self._undo),
+                           (getattr(self, "_redo_btn", None), self._redo)):
+            if btn is None:
+                continue
+            try:
+                btn.config(state="normal" if stack else "disabled",
+                           bg=BTN_DEL if stack else BORDER)
+            except Exception:
+                pass
+
+    def _bind_undo_keys(self):
+        def handler(event):
+            if sys.platform == "win32":
+                code = event.keycode                 # коды физических клавиш — не зависят от раскладки
+                is_z, is_y = code == 90, code == 89
+            else:
+                k = (event.keysym or "").lower()
+                is_z, is_y = k == "z", k == "y"
+            shift = bool(event.state & 0x0001)
+            if (is_z and shift) or is_y:
+                return self.redo()
+            if is_z:
+                return self.undo()
+            return None
+        self.bind_all("<Control-KeyPress>", handler, add="+")
 
     def _visible_range_note(self, ax):
         """«· visible x −8.33…8.33» — когда холст шире/выше окна и видно больше, чем задано."""

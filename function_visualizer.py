@@ -460,6 +460,18 @@ LAST_CURVES = []
 # Приложение может поставить сюда функцию event → bool: «под курсором уже
 # есть свой объект» (щуп) — тогда меню свободных подписей не открывается.
 PRESS_HIT_HOOK = None
+# Вызывается после действий мышью, меняющих состояние графика (перетащили
+# подпись, добавили/изменили/удалили свободную подпись, повернули её,
+# сменили цвет/размер) — приложение записывает шаг для отмены.
+STATE_CHANGED_HOOK = None
+
+
+def _notify_state_changed():
+    if STATE_CHANGED_HOOK is not None:
+        try:
+            STATE_CHANGED_HOOK()
+        except Exception:
+            pass
 
 
 @functools.lru_cache(maxsize=1024)
@@ -2426,6 +2438,7 @@ class DraggableAnnotation:
     def on_release(self, event):
         if self.press is not None:
             self._store_offset()
+            _notify_state_changed()
         self.press = None
         self.fig.canvas.draw_idle()
 
@@ -2573,6 +2586,9 @@ class FreeTextManager:
         self.fig.canvas.draw_idle()
 
     def on_release(self, event):
+        if self.drag is not None:
+            self.drag = None
+            _notify_state_changed()
         self.drag = None
 
     def on_scroll(self, event):
@@ -2587,6 +2603,7 @@ class FreeTextManager:
         artist.set_rotation(new_rotation)
         record['rotation'] = new_rotation
         self.fig.canvas.draw_idle()
+        _notify_state_changed()
 
     # ── Добавление / редактирование / удаление ──────────────
     def _add_text_at(self, x, y):
@@ -2600,6 +2617,7 @@ class FreeTextManager:
         FREE_TEXTS.append(record)
         self.entries.append((record, self._create_artist(record)))
         self.fig.canvas.draw_idle()
+        _notify_state_changed()
 
     def _edit_text(self, record, artist):
         from tkinter import simpledialog
@@ -2614,6 +2632,7 @@ class FreeTextManager:
         record['text'] = new_text
         artist.set_text(bidi_display(prettify_math_text(new_text)))
         self.fig.canvas.draw_idle()
+        _notify_state_changed()
 
     def _delete(self, record, artist):
         try:
@@ -2624,11 +2643,13 @@ class FreeTextManager:
         if record in FREE_TEXTS:
             FREE_TEXTS.remove(record)
         self.fig.canvas.draw_idle()
+        _notify_state_changed()
 
     def _reset_rotation(self, record, artist):
         record['rotation'] = 0
         artist.set_rotation(0)
         self.fig.canvas.draw_idle()
+        _notify_state_changed()
 
     def _set_color(self, record, artist):
         from tkinter import colorchooser
@@ -2640,11 +2661,13 @@ class FreeTextManager:
         record['color'] = result[1]
         artist.set_color(result[1])
         self.fig.canvas.draw_idle()
+        _notify_state_changed()
 
     def _set_size(self, record, artist, size):
         record['fontsize'] = size
         artist.set_fontsize(size)
         self.fig.canvas.draw_idle()
+        _notify_state_changed()
 
     def _build_size_submenu(self, parent_menu, record, artist):
         import tkinter as tk
@@ -2805,11 +2828,13 @@ class AxisLabelManager:
         AXIS_LABELS[key]['color'] = result[1]
         art.set_color(result[1])
         self.fig.canvas.draw_idle()
+        _notify_state_changed()
 
     def _set_size(self, key, size):
         AXIS_LABELS[key]['fontsize'] = size
         self.artists[key].set_fontsize(size)
         self.fig.canvas.draw_idle()
+        _notify_state_changed()
 
     def _menu(self, event, key):
         import tkinter as tk
