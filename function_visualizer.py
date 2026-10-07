@@ -666,15 +666,26 @@ def _parse_transformations():
 
 # ── Параметры-ползунки ────────────────────────────────────────────────
 # PARAMS: имя → значение. Одиночная буква в формуле (кроме x, y, e) — это
-# параметр: при разборе он подставляется точным числом (Rational('1.5') =
-# 3/2), поэтому точные подписи (корни, экстремумы) считаются как обычно,
-# а все кэши учитывают текущие значения через _params_key().
+# параметр. Разбор делается ОДИН раз на строку: буква остаётся символом
+# sympy (_PARAM_SYMS), а текущие значения подставляются при каждом вызове
+# build_numpy_func / build_implicit_func: в sympy-выражение — точным числом
+# (Rational('1.5') = 3/2, поэтому точные подписи считаются как обычно),
+# в numpy-функцию — через замыкание над lambdify по (x, *параметры).
+# Поэтому шаг ползунка не перезапускает parse_expr/lambdify.
 PARAMS = {}
 _PARAM_NAME_RE = re.compile(r'^[a-df-wz]$')
+_PARAM_SYMS = {}            # буква → Symbol (один объект на букву)
 
 
 def is_param_name(name):
     return bool(_PARAM_NAME_RE.match(str(name)))
+
+
+def _param_sym(name):
+    s = _PARAM_SYMS.get(name)
+    if s is None:
+        s = _PARAM_SYMS[name] = symbols(name)
+    return s
 
 
 def _param_value(v):
@@ -685,15 +696,25 @@ def _param_value(v):
         return sympify(float(v))
 
 
-def _params_key():
-    return tuple(sorted((str(k), str(v)) for k, v in PARAMS.items()))
+def _param_float(v):
+    """Значение параметра как float для numpy-функции ('1/3' тоже принимается)."""
+    try:
+        return float(v)
+    except Exception:
+        return float(_param_value(v))
+
+
+def _param_names():
+    """Имена параметров PARAMS (только допустимые буквы), по алфавиту: ключ кэша разбора."""
+    return tuple(sorted(str(k) for k in PARAMS if is_param_name(k)))
 
 
 def _parse_local_dict(with_y=False, with_params=True):
     """
     Словарь имён для parse_expr: 'e' — число Эйлера, 'pi' — π, 'x' (и 'y') —
     переменные; дополнительные имена функций (русские tg/ctg, arc-формы,
-    nroot/cbrt/root); параметры PARAMS — их текущие значения.
+    nroot/cbrt/root); параметры PARAMS — символы sympy (значения
+    подставляются позже, при связывании).
     """
     from sympy import asin, acos, atan, acot, tan, cot, sinh, cosh, tanh
     d = {'e': E, 'pi': pi, 'x': _X_SYM,
@@ -706,9 +727,9 @@ def _parse_local_dict(with_y=False, with_params=True):
     if with_y:
         d['y'] = _Y_SYM
     if with_params:
-        for k, v in PARAMS.items():
+        for k in PARAMS:
             if is_param_name(k):
-                d[str(k)] = _param_value(v)
+                d[str(k)] = _param_sym(str(k))
     return d
 
 
@@ -762,6 +783,9 @@ def parse_exact(text):
                           local_dict=_parse_local_dict())
         expr = sympify(expr)
         if expr.free_symbols:
+            # параметр в тексте константы: подставляем текущее значение
+            expr = expr.xreplace(_param_mapping(expr.free_symbols))
+        if expr.free_symbols:
             return None
         if expr.has(oo, -oo, zoo, nan):
             return None
@@ -782,23 +806,190 @@ def _unknown_names_msg(src, extra_symbols, local_dict):
     return "unknown name: " + ', '.join(bad)
 
 
-_NUMPY_FUNC_CACHE = {}      # func_str -> (expr, expr_raw, f)
-_IMPLICIT_FUNC_CACHE = {}   # (lhs, rhs) -> (H, h)
+# ── Связывание значений параметров ────────────────────────────────────
+
+def _param_mapping(free_symbols):
+    """{Symbol параметра: точное текущее значение} для символов из free_symbols."""
+    m = {}
+    for s in free_symbols:
+        name = str(s)
+        if name in PARAMS and is_param_name(name):
+            m[s] = _param_value(PARAMS[name])
+    return m
+
+
+# Функции, вызовы которых parse_expr(evaluate=False) оставляет невычисленными
+# (по имени в строке); остальные (nroot, root, ...) вычисляются даже в raw.
+try:
+    from sympy.parsing.sympy_parser import EvaluateFalseTransformer as _EFT
+    _RAW_UNEVAL_FUNCS = frozenset(getattr(f, '__name__', str(f)) for f in _EFT.functions)
+except Exception:                      # старый sympy: считаем все функции невычисляемыми
+    _RAW_UNEVAL_FUNCS = None
+
+
+def _xreplace_unevaluated(e, mapping, eval_funcs=True):
+    """
+    Замена символов без автоматических упрощений sympy (evaluate=False):
+    сохраняет невычисленную структуру expr_raw, как если бы число стояло
+    в строке с самого начала (0*x² не схлопывается, (x²−1)/(x−1) не сокращается).
+    eval_funcs=True повторяет поведение parse_expr(evaluate=False): функции
+    вне его списка (nroot и т.п.) вычисляются; False — ничего не вычисляется
+    (для сравнения структуры в _same_structure).
+    """
+    if not e.args:
+        return mapping.get(e, e)
+    args = tuple(_xreplace_unevaluated(a, mapping, eval_funcs) for a in e.args)
+    if all(a is b for a, b in zip(args, e.args)):
+        return e
+    if (eval_funcs and e.is_Function and _RAW_UNEVAL_FUNCS is not None
+            and e.func.__name__ not in _RAW_UNEVAL_FUNCS):
+        return e.func(*args)
+    try:
+        return e.func(*args, evaluate=False)
+    except TypeError:
+        return e.func(*args)
+
+
+def _skeleton(e):
+    """
+    Структура выражения без учёта порядка слагаемых/множителей; чисто
+    числовые части Add/Mul свёрнуты в одно число. Возвращает число sympy
+    (для числового поддерева) или строку. Совпадение скелетов подставленного
+    выражения и его невычисленной подстановки означает, что подстановка
+    значений не изменила структуру (сработали только числовые свёртки).
+    """
+    if not e.args:
+        return e if e.is_Number else str(e)
+    kids = [_skeleton(a) for a in e.args]
+    if e.is_Add or e.is_Mul:
+        nums = [k for k in kids if not isinstance(k, str)]
+        rest = [k for k in kids if isinstance(k, str)]
+        if nums:
+            n = e.func(*nums)
+            if not rest:
+                return n
+            rest.append(str(n))
+        return e.func.__name__ + '(' + ','.join(sorted(rest)) + ')'
+    return e.func.__name__ + '(' + ','.join(str(k) for k in kids) + ')'
+
+
+_SPECIAL_EXPS = (S.Half, -S.Half, S.NegativeOne)
+
+
+def _has_param_exponent(expr, syms):
+    """Есть ли параметр в показателе степени (x^a): для таких выражений
+    lambdify печатает sqrt(x), 1/sqrt(x), 1/x вместо x**a при особых значениях."""
+    syms = set(syms)
+    return any(p.exp.free_symbols & syms for p in expr.atoms(Pow))
+
+
+def _same_structure(entry, expr, mapping):
+    """
+    Можно ли считать expr (параметры заменены числами) через заранее
+    собранную g(vars, *params)? Да, если подстановка не изменила структуру:
+    0*ln(x) + x → x, (x−a)/(x−1) при a = 1 → 1, ln(a) при a = −1 → iπ,
+    x/(a+1) при a = −1 → zoo*x меняют её, и тогда numpy-функция строится по
+    подставленному выражению, чтобы численное поведение совпадало с прежним.
+    Отдельно: параметр в показателе при a ∈ {1/2, −1/2, −1} печатается иначе.
+    """
+    if entry.pow_param and any(p.exp in _SPECIAL_EXPS for p in expr.atoms(Pow)):
+        return False
+    return _skeleton(expr) == _skeleton(
+        _xreplace_unevaluated(entry.expr, mapping, eval_funcs=False))
+
+
+class _ParamEntry:
+    """Разобранная один раз строка с параметрами-символами + lambdify g по
+    (vars, *params). last: кэш последнего связывания (значения → результат)."""
+    __slots__ = ('expr', 'raw', 'names', 'syms', 'g', 'pow_param', 'last')
+
+    def __init__(self, expr, raw, names, syms, g):
+        self.expr, self.raw, self.names, self.syms = expr, raw, names, syms
+        self.g, self.pow_param, self.last = g, _has_param_exponent(expr, syms), None
+
+    def values_key(self):
+        return tuple(str(PARAMS[n]) for n in self.names)
+
+
+def _bind_numpy(entry):
+    """(expr, expr_raw, f) с текущими значениями параметров."""
+    if not entry.names:
+        return entry.last
+    vkey = entry.values_key()
+    last = entry.last
+    if last is not None and last[0] == vkey:
+        return last[1]
+    x = _X_SYM
+    mapping = {s: _param_value(PARAMS[n]) for n, s in zip(entry.names, entry.syms)}
+    expr = entry.expr.xreplace(mapping)
+    raw = _xreplace_unevaluated(entry.raw, mapping)
+    if _same_structure(entry, expr, mapping):
+        vals = tuple(_param_float(PARAMS[n]) for n in entry.names)
+        g = entry.g
+
+        def f(xs, _g=g, _v=vals):
+            return _g(xs, *_v)
+    else:
+        f = lambdify(x, expr, modules=_LAMBDIFY_MODULES)
+    res = (expr, raw, f)
+    entry.last = (vkey, res)
+    return res
+
+
+def _bind_implicit(entry):
+    """(H, h) с текущими значениями параметров."""
+    if not entry.names:
+        return entry.last
+    vkey = entry.values_key()
+    last = entry.last
+    if last is not None and last[0] == vkey:
+        return last[1]
+    x, y = _X_SYM, _Y_SYM
+    mapping = {s: _param_value(PARAMS[n]) for n, s in zip(entry.names, entry.syms)}
+    H = entry.expr.xreplace(mapping)
+    if _same_structure(entry, H, mapping):
+        vals = tuple(_param_float(PARAMS[n]) for n in entry.names)
+        g = entry.g
+
+        def h(X, Y, _g=g, _v=vals):
+            return _g(X, Y, *_v)
+    else:
+        h = lambdify((x, y), H, modules=_LAMBDIFY_MODULES)
+    res = (H, h)
+    entry.last = (vkey, res)
+    return res
+
+
+_NUMPY_FUNC_CACHE = {}      # (func_str, имена параметров) -> _ParamEntry
+_IMPLICIT_FUNC_CACHE = {}   # (lhs, rhs, имена параметров) -> _ParamEntry
 _FUNC_CACHE_LIMIT = 256
+
+
+def _cache_put(cache, key, entry, nokey):
+    if len(cache) >= _FUNC_CACHE_LIMIT:
+        cache.clear()
+    cache[key] = entry
+    if not entry.names:
+        # без параметров результат не зависит от PARAMS: кэшируем навсегда по строке
+        cache[nokey] = entry
 
 
 def build_numpy_func(func_str):
     """
     Строит (expr, expr_raw, f) для строки функции: sympy-выражение,
     его невычисленную форму (evaluate=False — для поиска особых точек
-    вида (x²−1)/(x−1)) и numpy-функцию f(x). Результат мемоизируется по
-    строке: в live-режиме функция вызывается при каждой перерисовке.
-    Ошибки разбора НЕ кэшируются (бросаются вызывающему).
+    вида (x²−1)/(x−1)) и numpy-функцию f(x). Разбор мемоизируется по
+    строке и набору ИМЁН параметров; значения параметров подставляются
+    при каждом вызове (см. _bind_numpy): в live-режиме функция вызывается
+    при каждой перерисовке. Ошибки разбора НЕ кэшируются (бросаются вызывающему).
     """
-    cache_key = (func_str, _params_key())
-    hit = _NUMPY_FUNC_CACHE.get(cache_key)
-    if hit is not None:
-        return hit
+    nokey = (func_str, ())
+    entry = _NUMPY_FUNC_CACHE.get(nokey)
+    if entry is None:
+        cache_key = (func_str, _param_names())
+        entry = _NUMPY_FUNC_CACHE.get(cache_key)
+    if entry is not None:
+        return _bind_numpy(entry)
     from sympy.parsing.sympy_parser import parse_expr
     src = _preprocess_func_str(func_str)
     x = _X_SYM
@@ -811,14 +1002,18 @@ def build_numpy_func(func_str):
                       local_dict=local_dict)
     expr = sympify(expr)
     expr_raw = sympify(expr_raw)
-    extra = expr.free_symbols - {x}
+    free = expr.free_symbols | expr_raw.free_symbols
+    names = [n for n in local_dict if is_param_name(n) and local_dict[n] in free]
+    syms = [local_dict[n] for n in names]
+    extra = expr.free_symbols - {x} - set(syms)
     if extra:
         raise NameError(_unknown_names_msg(src, extra, local_dict))
-    f = lambdify(x, expr, modules=_LAMBDIFY_MODULES)
-    if len(_NUMPY_FUNC_CACHE) >= _FUNC_CACHE_LIMIT:
-        _NUMPY_FUNC_CACHE.clear()
-    _NUMPY_FUNC_CACHE[cache_key] = (expr, expr_raw, f)
-    return expr, expr_raw, f
+    g = lambdify((x, *syms), expr, modules=_LAMBDIFY_MODULES)
+    entry = _ParamEntry(expr, expr_raw, names, syms, g)
+    if not names:
+        entry.last = (expr, expr_raw, g)
+    _cache_put(_NUMPY_FUNC_CACHE, cache_key, entry, nokey)
+    return _bind_numpy(entry)
 
 
 def build_implicit_func(lhs_str, rhs_str):
@@ -828,12 +1023,16 @@ def build_implicit_func(lhs_str, rhs_str):
     можно нарисовать как линию уровня 0 (contour). Поддерживает pi/e,
     неявное умножение, ^ как степень — так же, как build_numpy_func.
     Возвращает (H_sympy, h), h(X, Y) работает с массивами (meshgrid).
-    Результат мемоизируется по паре строк.
+    Разбор мемоизируется по паре строк и именам параметров, значения
+    подставляются при каждом вызове (см. _bind_implicit).
     """
-    key = (lhs_str, rhs_str, _params_key())
-    hit = _IMPLICIT_FUNC_CACHE.get(key)
-    if hit is not None:
-        return hit
+    nokey = (lhs_str, rhs_str, ())
+    entry = _IMPLICIT_FUNC_CACHE.get(nokey)
+    if entry is None:
+        key = (lhs_str, rhs_str, _param_names())
+        entry = _IMPLICIT_FUNC_CACHE.get(key)
+    if entry is not None:
+        return _bind_implicit(entry)
     from sympy.parsing.sympy_parser import parse_expr
     x, y = _X_SYM, _Y_SYM
     transformations = _parse_transformations()
@@ -844,14 +1043,18 @@ def build_implicit_func(lhs_str, rhs_str):
     rhs = parse_expr(_preprocess_func_str(rhs_str),
                      transformations=transformations, local_dict=local_dict)
     H = sympify(lhs - rhs)
-    extra = H.free_symbols - {x, y}
+    free = H.free_symbols
+    names = [n for n in local_dict if is_param_name(n) and local_dict[n] in free]
+    syms = [local_dict[n] for n in names]
+    extra = free - {x, y} - set(syms)
     if extra:
         raise NameError(_unknown_names_msg(lhs_str + ' ' + rhs_str, extra, local_dict))
-    h = lambdify((x, y), H, modules=_LAMBDIFY_MODULES)
-    if len(_IMPLICIT_FUNC_CACHE) >= _FUNC_CACHE_LIMIT:
-        _IMPLICIT_FUNC_CACHE.clear()
-    _IMPLICIT_FUNC_CACHE[key] = (H, h)
-    return H, h
+    g = lambdify((x, y, *syms), H, modules=_LAMBDIFY_MODULES)
+    entry = _ParamEntry(H, None, names, syms, g)
+    if not names:
+        entry.last = (H, g)
+    _cache_put(_IMPLICIT_FUNC_CACHE, key, entry, nokey)
+    return _bind_implicit(entry)
 
 
 def _eval_array(f, xs):
