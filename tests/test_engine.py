@@ -159,9 +159,16 @@ def hatch_lines(ax):
     from matplotlib.collections import LineCollection
     segs = []
     for c in ax.collections:
+        if c.get_gid() == 'grid':          # сетка - тоже LineCollection 0.6 (gid 'grid')
+            continue
         if isinstance(c, LineCollection) and abs(float(c.get_linewidths()[0]) - 0.6) < 1e-9:
             segs.extend(np.asarray(s, float) for s in c.get_segments())
     return segs
+
+
+def grid_collection(ax):
+    """LineCollection сетки (gid 'grid') или None."""
+    return next((c for c in ax.collections if c.get_gid() == 'grid'), None)
 
 
 def hatch_dots(ax):
@@ -949,7 +956,7 @@ def test_hidden_axes():
     assert area == pytest.approx(4 / 3, abs=2e-3) and str(exact) == "4/3" and not cut
     assert fv.region_at(0.0, 0.5)[0].sum() == pytest.approx(fv._LAST_REGION['mask'].sum())
     assert len(curve_lines(ax)) == 2                                    # кривые и сетка остались
-    assert ax.xaxis.get_gridlines()[0].get_visible()
+    assert grid_collection(ax) is not None and grid_collection(ax).get_visible()
 
 
 def test_region_area_label():
@@ -1040,8 +1047,112 @@ def test_grid_far_from_origin():
         ys = sorted(res['ax'].yaxis.get_majorticklocs())
         assert len(xs) >= 8 and xs[0] >= xl and xs[-1] <= xr, (xl, xs)
         assert len(ys) >= 8 and ys[0] >= yb and ys[-1] <= yt, (yb, ys)
-        tick_marks = [l for l in res['ax'].lines if l.get_marker() in ('|', '_')]
-        assert len(tick_marks) >= 16          # ~9 делений по каждой оси
+        # штрихи делений: одна Line2D с маркерами на ось, ~9 делений по каждой
+        tick_marks = sum(len(l.get_xdata()) for l in res['ax'].lines if l.get_marker() in ('|', '_'))
+        assert tick_marks >= 16
+
+
+def test_static_frame_grid_collection_and_tick_labels():
+    """Статичный кадр: сетка - одна LineCollection (gid 'grid', цвет темы, 0.6) на тех же
+    позициях, что get_majorticklocs(); объекты Axis скрыты; штрихи делений - по одной Line2D
+    на ось; подписи делений - Text ровно на 6 пт от деления, не отсекаются у края окна;
+    сетка попадает в SVG; GRID=0 - коллекции сетки нет."""
+    import io
+    import xml.etree.ElementTree as ET
+    from matplotlib.colors import to_rgba
+    fig = Figure(figsize=(8, 6), dpi=100)
+    FigureCanvasAgg(fig)
+    res = draw(["x^2"], fig=fig)
+    ax = res['ax']
+    lc = grid_collection(ax)
+    assert lc is not None and lc.get_visible()
+    assert float(lc.get_linewidths()[0]) == pytest.approx(0.6)
+    assert tuple(lc.get_colors()[0]) == pytest.approx(to_rgba(fv.PLOT_THEMES[fv.PLOT_THEME]['grid']))
+    segs = [np.asarray(s, float) for s in lc.get_segments()]
+    xs = sorted({round(float(s[0, 0]), 9) for s in segs if s[0, 0] == s[1, 0]})
+    ys = sorted({round(float(s[0, 1]), 9) for s in segs if s[0, 1] == s[1, 1]})
+    assert xs == sorted(ax.xaxis.get_majorticklocs()) and ys == sorted(ax.yaxis.get_majorticklocs())
+    assert len(segs) == len(xs) + len(ys) and len(xs) >= 9
+    assert not ax.xaxis.get_visible() and not ax.yaxis.get_visible()
+    marks = {l.get_marker(): len(l.get_xdata()) for l in ax.lines if l.get_marker() in ('|', '_')}
+    assert marks == {'|': len([v for v in xs if abs(v) > 1e-9]), '_': len([v for v in ys if abs(v) > 1e-9])}
+    # подпись '3' оси X: центр под делением, верх на 6 пт ниже оси
+    fig.canvas.draw()
+    rend = fig.canvas.get_renderer()
+    t3 = next(t for t in ax.texts if t.get_text().replace('$', '') == '3'
+              and tuple(t.get_position()) == (3.0, 0.0))
+    px, py = ax.transData.transform((3.0, 0.0))
+    bb = t3.get_window_extent(rend)
+    assert (bb.x0 + bb.x1) / 2 == pytest.approx(px, abs=0.05)
+    assert bb.y1 == pytest.approx(py - 6 * fig.dpi / 72, abs=0.05)
+    # SVG: группа id="grid" с элементами на каждый отрезок
+    buf = io.BytesIO()
+    fig.savefig(buf, format='svg')
+    root = ET.fromstring(buf.getvalue())
+    grid_g = next(e for e in root.iter() if e.get('id') == 'grid')
+    uses = [e for e in grid_g.iter() if e.tag.endswith('use') or e.tag.endswith('path')]
+    assert len(uses) >= len(segs)
+    # ось X на нижнем краю окна: подписи делений за рамкой осей, но нарисованы (не отсекаются)
+    fv.EXTEND_TO_CANVAS = False
+    try:
+        res = draw(["sin(x)"], fig=fig, X_LIM_L=100, X_LIM_R=110, Y_LIM_B=200, Y_LIM_T=210)
+    finally:
+        fv.EXTEND_TO_CANVAS = True
+    ax = res['ax']
+    fig.canvas.draw()
+    rend = fig.canvas.get_renderer()
+    img = np.asarray(fig.canvas.buffer_rgba())
+    h = img.shape[0]
+    bg = np.asarray(to_rgba(fv.PLOT_THEMES[fv.PLOT_THEME]['bg'])[:3]) * 255
+    t = next(t for t in ax.texts if t.get_text().replace('$', '') == '105')
+    bb = t.get_window_extent(rend)
+    assert bb.y1 < ax.bbox.y0                                            # ниже рамки осей
+    patch = img[int(h - bb.y1):int(h - bb.y0) + 1, int(bb.x0):int(bb.x1) + 1, :3]
+    assert (np.abs(patch - bg) > 40).any()                              # подпись нарисована
+    # GRID=0: ни коллекции сетки, ни линий сетки
+    res = draw(["x^2"], fig=fig, GRID=0)
+    assert grid_collection(res['ax']) is None
+
+
+def test_frame_axes_reuse():
+    """Повторный кадр на той же фигуре переиспользует Axes (без fig.clear()+add_subplot):
+    артисты прошлого кадра сняты, пределы и локаторы заданы заново, кадр попиксельно равен
+    кадру на свежей фигуре; чужие оси или артисты на уровне фигуры - новые оси через fig.clear()."""
+    fig = Figure(figsize=(8, 6), dpi=100)
+    FigureCanvasAgg(fig)
+    fv.EXTEND_TO_CANVAS = False
+    try:
+        ax1 = draw(["x^2", "x=1"], fig=fig, FILL=[fv.region_fill(0.5, 0.1)])['ax']
+        assert hatch_lines(ax1) and any(list(l.get_xdata()) == [1.0, 1.0] for l in ax1.lines)
+        fv.FILL = []
+        ax2 = draw(["x^2"], fig=fig, X_LIM_L=-3, X_LIM_R=3, Y_LIM_B=-2, Y_LIM_T=2,
+                   X_GRID=0.5, Y_GRID=0.5)['ax']
+        assert ax2 is ax1 and fig.axes == [ax1]
+        assert not any(list(l.get_xdata()) == [1.0, 1.0] for l in ax2.lines)   # вертикаль снята
+        assert hatch_lines(ax2) == [] and grid_collection(ax2) is not None
+        assert ax2.get_xlim() == (-3.0, 3.0) and ax2.get_ylim() == (-2.0, 2.0)
+        assert 0.5 in ax2.xaxis.get_majorticklocs() and 2.0 not in ax2.yaxis.get_majorticklocs()
+        # GRID=0 на тех же осях: FixedLocator прошлого кадра не остаётся
+        ax3 = draw(["x^2"], fig=fig, GRID=0)['ax']
+        assert ax3 is ax1 and grid_collection(ax3) is None
+        assert 0.5 not in ax3.xaxis.get_majorticklocs()
+        fig.canvas.draw()
+        img_reused = np.asarray(fig.canvas.buffer_rgba()).copy()
+        fig2 = Figure(figsize=(8, 6), dpi=100)
+        FigureCanvasAgg(fig2)
+        draw(["x^2"], fig=fig2, GRID=0)
+        fig2.canvas.draw()
+        assert np.array_equal(img_reused, np.asarray(fig2.canvas.buffer_rgba()))
+        # подпись на уровне фигуры: fig.clear() и новые оси
+        fig.text(0.5, 0.95, "note")
+        ax4 = draw(["x^2"], fig=fig)['ax']
+        assert ax4 is not ax1 and fig.axes == [ax4] and not fig.texts
+        # чужие оси на фигуре: тоже fig.clear()
+        fig.add_subplot(121)
+        ax5 = draw(["x^2"], fig=fig)['ax']
+        assert ax5 is not ax4 and fig.axes == [ax5]
+    finally:
+        fv.EXTEND_TO_CANVAS = True
 
 
 # ──────────────────────────────────────────────
