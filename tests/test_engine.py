@@ -1042,3 +1042,163 @@ def test_grid_far_from_origin():
         assert len(ys) >= 8 and ys[0] >= yb and ys[-1] <= yt, (yb, ys)
         tick_marks = [l for l in res['ax'].lines if l.get_marker() in ('|', '_')]
         assert len(tick_marks) >= 16          # ~9 делений по каждой оси
+
+
+# ──────────────────────────────────────────────
+#  Производительность: три точечных ускорения движка
+# ──────────────────────────────────────────────
+
+def _nan_edges_loop(mask):
+    """Прежняя (цикловая) реализация набора nan_edges из find_extrema_numerical."""
+    edges = set()
+    for i in range(1, len(mask)):
+        if mask[i] != mask[i - 1]:
+            edges.add(i - 1)
+            edges.add(i)
+    return edges
+
+
+def test_nan_edge_indices_matches_loop():
+    rng = np.random.default_rng(12345)
+    for n in (0, 1, 2, 3, 7, 6000):
+        for p in (0.0, 0.05, 0.5, 0.95, 1.0):
+            mask = rng.random(n) < p
+            assert fv._nan_edge_indices(mask) == _nan_edges_loop(mask)
+    # ручные случаи: NaN-зона в начале, в конце и внутри
+    assert fv._nan_edge_indices([False, True, True]) == {0, 1}
+    assert fv._nan_edge_indices([True, True, False]) == {1, 2}
+    assert fv._nan_edge_indices([True, False, True]) == {0, 1, 2}
+    assert fv._nan_edge_indices([True, True, True]) == set()
+
+
+@pytest.mark.parametrize("func_str, disc, expected", [
+    ("sqrt(4-x^2)", [], [(0.0, 2.0)]),     # NaN при |x|>2, максимум (0, 2)
+    ("1/x", [0.0], []),                    # разрыв в 0, экстремумов нет
+    ("log(x)", [], []),                    # NaN при x<=0, монотонна
+])
+def test_extrema_with_nan_gaps(func_str, disc, expected):
+    _expr, _raw, f = fv.build_numpy_func(func_str)
+    xs = np.linspace(-5, 5, 6001)          # нечётное число узлов: 0.0 на сетке
+    ys = fv.make_y_array(f, xs, disc, -5, 5)
+    finite = np.isfinite(ys)
+    assert finite.any() and not finite.all()
+    edges = sorted(fv._nan_edge_indices(finite))
+    assert edges, "у функции должны быть границы NaN-областей"
+    edge_xs = xs[edges]
+    extrema = fv.find_extrema_numerical(f, xs, ys, -5, 5, disc)
+    assert len(extrema) == len(expected)
+    for (ex, ey), (px, py) in zip(sorted(extrema), sorted(expected)):
+        assert abs(ex - px) < 1e-6 and abs(ey - py) < 1e-6
+    # ни один экстремум не стоит вплотную к границе NaN-области
+    # (артефакт nan_to_num: крайний конечный узел выглядит локальным минимумом)
+    for ex, _ey in extrema:
+        assert np.min(np.abs(edge_xs - ex)) > 0.05
+
+
+@pytest.mark.parametrize("text, expected", [
+    # быстрый путь (обычные десятичные числа)
+    ("1", 1.0), ("1.5", 1.5), ("-2", -2.0), ("+3", 3.0), (".5", 0.5), ("5.", 5.0),
+    ("1e3", 1000.0), ("1E-2", 0.01), ("-1.5e+2", -150.0), ("-7E+1", -70.0),
+    (" 2.5 ", 2.5), ("\t-3\n", -3.0), ("00012", 12.0), ("007.5", 7.5),
+    ("1e400", float("inf")), ("-1e400", float("-inf")), ("1e-400", 0.0),
+    ("12345678901234567890", 1.2345678901234567e+19),
+    # прежний путь (sympy / float): семантика не меняется
+    ("pi", math.pi), ("π", math.pi), ("2pi", 2 * math.pi), ("pi/2", math.pi / 2),
+    ("2*pi", 2 * math.pi), ("e", math.e), ("2e", 2 * math.e), ("1e", math.e),
+    ("e1", math.e), ("1/2", 0.5), ("3+2", 5.0), ("sqrt(2)", math.sqrt(2)),
+    ("- 2", -2.0), ("1 000", 0.0), ("1..2", 0.2), ("1e3.5", 500.0),
+    ("0x10", 16.0), ("1_000", 1000.0), ("٣", 3.0), ("1.5.5", 0.75),
+    ("inf", float("inf")), ("+inf", float("inf")), ("-inf", float("-inf")),
+    ("+∞", float("inf")), ("∞", float("inf")), ("-∞", float("-inf")),
+])
+def test_parse_number_table(text, expected):
+    got = fv.parse_number(text)
+    assert type(got) is float
+    assert got == expected
+
+
+def test_parse_number_nan_and_signed_zero():
+    assert math.isnan(fv.parse_number("nan"))
+    # «-0» через sympy давал +0.0, быстрый путь обязан вернуть то же
+    for t in ("-0", "-0.0", "-.0", "-0e0", "0", "+0"):
+        v = fv.parse_number(t)
+        assert v == 0.0 and math.copysign(1.0, v) == 1.0, t
+
+
+@pytest.mark.parametrize("text", ["−5", "−1.5", "−1e3", "−inf", "−", "abc", "1,5",
+                                  "1-", "1e+", "", "   "])
+def test_parse_number_garbage_raises(text):
+    with pytest.raises(ValueError):
+        fv.parse_number(text)
+
+
+def test_parse_number_default():
+    assert fv.parse_number("", default=7.5) == 7.5
+    assert fv.parse_number(None, default=-1.0) == -1.0
+    assert fv.parse_number("   ", default=float("inf")) == float("inf")
+    with pytest.raises(ValueError):
+        fv.parse_number(None)
+
+
+def _render_multiscript_text():
+    fig = Figure(figsize=(4, 3), dpi=100)
+    canvas = FigureCanvasAgg(fig)
+    ax = fig.add_subplot()
+    ax.text(0.1, 0.7, "Привет мир, функция", fontsize=14)
+    ax.text(0.1, 0.4, "שלום עולם", fontsize=14)
+    ax.text(0.1, 0.1, "y = x² + $\\sqrt{2}$", fontsize=14)
+    ax.set_title("Заголовок")
+    canvas.draw()
+    return np.array(canvas.buffer_rgba()).copy()
+
+
+def test_font_lookup_memo_installed_once_and_pixel_identical():
+    from matplotlib import font_manager
+    fm = font_manager.fontManager
+    if not hasattr(type(fm), '_find_fonts_by_props'):
+        pytest.skip("в этой версии matplotlib нет FontManager._find_fonts_by_props")
+    assert fv._FONT_LOOKUP_MEMO_INSTALLED
+    assert '_find_fonts_by_props' in vars(fm)
+    memo = vars(fm)['_find_fonts_by_props']
+    # повторный вызов ничего не переустанавливает
+    fv.apply_font_preset(fv.GRAPH_FONT)
+    assert vars(fm)['_find_fonts_by_props'] is memo
+
+    fv._FONT_LOOKUP_CACHE.clear()
+    with_memo = _render_multiscript_text()
+    assert fv._FONT_LOOKUP_CACHE, "кэш должен наполниться при отрисовке"
+    with_memo_again = _render_multiscript_text()
+    del fm._find_fonts_by_props          # временно снимаем мемоизацию
+    try:
+        without_memo = _render_multiscript_text()
+    finally:
+        fm._find_fonts_by_props = memo
+    assert np.array_equal(with_memo, with_memo_again)
+    assert np.array_equal(with_memo, without_memo)
+
+    # fallback-семейства (иврит) действительно участвуют в отрисовке
+    fig = Figure(figsize=(4, 3), dpi=100)
+    canvas = FigureCanvasAgg(fig)
+    ax = fig.add_subplot()
+    ax.text(0.1, 0.7, "Привет мир, функция", fontsize=14)
+    ax.text(0.1, 0.1, "y = x² + $\\sqrt{2}$", fontsize=14)
+    ax.set_title("Заголовок")
+    canvas.draw()
+    assert not np.array_equal(with_memo, np.array(canvas.buffer_rgba()))
+
+
+def test_font_lookup_memo_respects_preset_change():
+    from matplotlib import font_manager
+    if '_find_fonts_by_props' not in vars(font_manager.fontManager):
+        pytest.skip("мемоизация не установлена")
+    base = fv.GRAPH_FONT
+    try:
+        fv.apply_font_preset(base)
+        a = _render_multiscript_text()
+        fv.apply_font_preset('sans')
+        b = _render_multiscript_text()
+    finally:
+        fv.apply_font_preset(base)
+    c = _render_multiscript_text()
+    assert not np.array_equal(a, b)      # другой пресет: ключ кэша другой
+    assert np.array_equal(a, c)          # возврат к пресету: тот же результат

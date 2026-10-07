@@ -228,9 +228,72 @@ def _font_available(name):
         return False
 
 
+# Мемоизация FontManager._find_fonts_by_props. В matplotlib 3.11 этот метод
+# не кэшируется, а font.family у нас — список из ~7 семейств (fallback для
+# кириллицы/иврита), так что каждый Text при раскладке и отрисовке заново
+# перебирает семейства (60-70 вызовов, 6-7 мс на canvas.draw). Ключ кэша
+# повторяет ключ findfont: свойства шрифта + те же rcParams, чтобы смена
+# пресета или fallback-списка не отдавала устаревший результат.
+_FONT_LOOKUP_CACHE = {}
+_FONT_LOOKUP_MEMO_INSTALLED = False
+_FIND_FONTS_BY_PROPS_ORIG = None
+_FONT_RC_KEYS = ('font.family', 'font.style', 'font.variant', 'font.weight',
+                 'font.stretch', 'font.size', 'font.serif', 'font.sans-serif',
+                 'font.cursive', 'font.fantasy', 'font.monospace')
+_FONT_LOOKUP_CACHE_MAX = 4096
+
+
+def _install_font_lookup_memo():
+    """Оборачивает fontManager._find_fonts_by_props кэшем (один раз, только
+    если метод существует в этой версии matplotlib)."""
+    global _FONT_LOOKUP_MEMO_INSTALLED, _FIND_FONTS_BY_PROPS_ORIG
+    if _FONT_LOOKUP_MEMO_INSTALLED:
+        return
+    _FONT_LOOKUP_MEMO_INSTALLED = True
+    try:
+        from matplotlib import font_manager
+        fm = font_manager.fontManager
+        orig = getattr(type(fm), '_find_fonts_by_props', None)
+        if not callable(orig) or '_find_fonts_by_props' in vars(fm):
+            return
+        FontProperties = font_manager.FontProperties
+        rcParams = plt.rcParams
+    except Exception:
+        return
+    _FIND_FONTS_BY_PROPS_ORIG = orig
+    cache = _FONT_LOOKUP_CACHE
+
+    def _find_fonts_by_props_memo(prop, fontext='ttf', directory=None,
+                                  fallback_to_default=True,
+                                  rebuild_if_missing=True):
+        try:
+            rc = tuple(tuple(v) if isinstance(v, list) else v
+                       for v in (rcParams[k] for k in _FONT_RC_KEYS))
+            # copy(): вызывающий может потом менять свой FontProperties
+            # (set_size и т.п.), а ключ должен остаться неизменным
+            key_prop = prop.copy() if isinstance(prop, FontProperties) else prop
+            key = (key_prop, fontext, directory, fallback_to_default,
+                   rebuild_if_missing, rc)
+            hit = cache.get(key)
+        except Exception:
+            # нехэшируемые свойства (старые версии) — без кэша
+            return orig(fm, prop, fontext, directory,
+                        fallback_to_default, rebuild_if_missing)
+        if hit is None:
+            hit = tuple(orig(fm, prop, fontext, directory,
+                             fallback_to_default, rebuild_if_missing))
+            if len(cache) >= _FONT_LOOKUP_CACHE_MAX:
+                cache.clear()
+            cache[key] = hit
+        return list(hit)
+
+    fm._find_fonts_by_props = _find_fonts_by_props_memo
+
+
 def apply_font_preset(name=None):
     """Применяет пресет шрифта к rcParams (вызывается при смене настройки)."""
     global GRAPH_FONT
+    _install_font_lookup_memo()
     name = name or GRAPH_FONT
     families, fontset = FONT_PRESETS.get(name, FONT_PRESETS['schola'])
     GRAPH_FONT = name if name in FONT_PRESETS else 'schola'
@@ -1550,6 +1613,13 @@ def math_label(frag):
     return t if _mathtext_ok(t) else frag
 
 
+# Обычное десятичное число (знак, цифры, точка, показатель степени) — только
+# ASCII-цифры: всё остальное («1_000», «0x10», «1 000», арабские цифры, «−5»)
+# идёт прежним путём через sympy/float, чтобы семантика не изменилась.
+_PLAIN_NUMBER_RE = re.compile(r'[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:e[+-]?[0-9]+)?\Z',
+                              re.ASCII)
+
+
 def parse_number(s, default=None):
     """
     Парсит строку с числом ИЛИ математическим выражением в float.
@@ -1568,6 +1638,12 @@ def parse_number(s, default=None):
         if default is not None:
             return default
         raise ValueError("empty")
+
+    # Быстрый путь: обычное десятичное число (GUI зовёт parse_number ~12 раз
+    # за кадр, а parse_expr стоит 0.3-0.5 мс). «+ 0.0» нормализует «-0» в 0.0,
+    # как это делал путь через sympy.
+    if _PLAIN_NUMBER_RE.match(t):
+        return float(t) + 0.0
 
     # Бесконечности — отдельно (sympy их тоже понимает, но так быстрее и явнее)
     t_clean = t.replace(" ", "")
@@ -2218,6 +2294,20 @@ def _refine_extremum(f, x_vals, idx, is_max):
     return float(x_vals[idx]), float(y_grid)
 
 
+def _nan_edge_indices(finite_mask):
+    """
+    Индексы узлов по обе стороны каждой границы NaN-области: для каждого i,
+    где finite_mask[i] != finite_mask[i-1], в набор попадают i-1 и i.
+    Векторный эквивалент прежнего цикла по 6000 точкам (экономит 6-7 мс
+    на функцию за кадр).
+    """
+    finite_mask = np.asarray(finite_mask, dtype=bool)
+    if finite_mask.size < 2:
+        return set()
+    edges = np.flatnonzero(finite_mask[1:] != finite_mask[:-1])
+    return set(edges.tolist()) | set((edges + 1).tolist())
+
+
 def find_extrema_numerical(f, x_vals, y_vals, y_lim_b, y_lim_t, disc_pts_x,
                            allow_pi=True, allow_e=True):
     """
@@ -2247,11 +2337,7 @@ def find_extrema_numerical(f, x_vals, y_vals, y_lim_b, y_lim_t, disc_pts_x,
         return any(abs(xv - d) < disc_tol for d in disc_pts_x)
 
     # Исключаем точки у границ NaN-областей (артефакты nan_to_num)
-    nan_edges = set()
-    for i in range(1, len(finite_mask)):
-        if finite_mask[i] != finite_mask[i-1]:
-            nan_edges.add(i-1)
-            nan_edges.add(i)
+    nan_edges = _nan_edge_indices(finite_mask)
 
     extrema = []
     seen = []
