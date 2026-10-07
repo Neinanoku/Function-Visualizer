@@ -1202,3 +1202,74 @@ def test_font_lookup_memo_respects_preset_change():
     c = _render_multiscript_text()
     assert not np.array_equal(a, b)      # другой пресет: ключ кэша другой
     assert np.array_equal(a, c)          # возврат к пресету: тот же результат
+
+
+def test_region_raster_helpers_match_dense_references():
+    """Растровые помощники заливки считают в окне маски, а не на полном растре, с тем же
+    результатом: _runs_along_rows против поточечного перебора, _region_center против
+    плотной версии на всём растре (сдвиг маски сдвигает центр ровно на столько же),
+    _mask_window - прямоугольник маски с запасом, обрезанный краями растра."""
+    rng = np.random.default_rng(7)
+    ny, nx = 61, 83
+    for p in (0.1, 0.5, 0.9):
+        a = rng.random((ny, nx)) < p
+        r, s, e = fv._runs_along_rows(a)
+        ref = []
+        for i in range(ny):
+            j = 0
+            while j < nx:
+                if a[i, j]:
+                    k = j
+                    while k < nx and a[i, k]:
+                        k += 1
+                    ref.append((i, j, k))
+                    j = k
+                else:
+                    j += 1
+        assert list(zip(r.tolist(), s.tolist(), e.tolist())) == ref
+    assert all(v.size == 0 for v in fv._runs_along_rows(np.zeros((3, 4), dtype=bool)))
+
+    def dense_center(mask):
+        """Прежняя реализация: четыре прохода accumulate по всему растру."""
+        ny, nx = mask.shape
+        blocked = ~mask
+        jj = np.broadcast_to(np.arange(nx)[None, :], mask.shape)
+        ii = np.broadcast_to(np.arange(ny)[:, None], mask.shape)
+        left = jj - np.maximum.accumulate(np.where(blocked, jj, -1), axis=1)
+        right = np.minimum.accumulate(np.where(blocked, jj, nx)[:, ::-1], axis=1)[:, ::-1] - jj
+        down = ii - np.maximum.accumulate(np.where(blocked, ii, -1), axis=0)
+        up = np.minimum.accumulate(np.where(blocked, ii, ny)[::-1, :], axis=0)[::-1, :] - ii
+        score = np.minimum(np.minimum(left, right), np.minimum(up, down)).astype(float)
+        score[blocked] = 0.0
+        best = float(score.max())
+        if best <= 0:
+            return None
+        cand = np.argwhere(score >= best * 0.85)
+        ci, cj = np.argwhere(mask).mean(axis=0)
+        d = (cand[:, 0] - ci) ** 2 + (cand[:, 1] - cj) ** 2
+        i, j = cand[int(np.argmin(d))]
+        return int(i), int(j)
+
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    shapes = [((yy - 20) ** 2 + (xx - 30) ** 2 <= 90) | ((yy >= 18) & (yy <= 22) & (xx >= 30) & (xx <= 60)),
+              (yy <= 2) | (xx >= nx - 2),                                     # у края растра
+              rng.random((ny, nx)) < 0.7,
+              np.zeros((ny, nx), dtype=bool)]
+    shapes[3][40, 50] = True                                                  # одна ячейка
+    for mask in shapes:
+        assert fv._region_center(mask) == dense_center(mask)
+    assert fv._region_center(np.zeros((ny, nx), dtype=bool)) is None
+    blob = shapes[0]
+    c0 = fv._region_center(blob)
+    shifted = np.zeros((ny + 15, nx + 9), dtype=bool)
+    shifted[15:, 9:] = blob
+    assert fv._region_center(shifted) == (c0[0] + 15, c0[1] + 9)
+
+    m = np.zeros((ny, nx), dtype=bool)
+    m[10:13, 20:25] = True
+    assert fv._mask_window(m, 1) == (slice(9, 14), slice(19, 26))
+    assert fv._mask_window(m, 0) == (slice(10, 13), slice(20, 25))
+    m[:] = False
+    m[0:2, nx - 3:nx] = True
+    assert fv._mask_window(m, 1) == (slice(0, 3), slice(nx - 4, nx))
+    assert fv._mask_window(np.zeros((ny, nx), dtype=bool)) is None

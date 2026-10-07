@@ -3450,12 +3450,25 @@ def _runs_along_rows(a):
     """Отрезки True в каждой строке булевой матрицы: массивы (строка, начало, конец),
     конец не включается, порядок - по строкам слева направо."""
     ny, nx = a.shape
-    pad = np.zeros((ny, nx + 2), dtype=np.int8)
+    pad = np.zeros((ny, nx + 2), dtype=bool)
     pad[:, 1:-1] = a
-    d = np.diff(pad, axis=1)
-    r, s = np.nonzero(d == 1)
-    _, e = np.nonzero(d == -1)
-    return r, s, e
+    # Строка окружена False, поэтому смены значения чередуются: начало, конец,
+    # начало, конец... - один проход nonzero вместо diff и двух сравнений
+    r, c = np.nonzero(pad[:, 1:] != pad[:, :-1])
+    return r[0::2], c[0::2], c[1::2]
+
+
+def _mask_window(mask, pad=1):
+    """Срез (строки, столбцы) прямоугольника ячеек маски, расширенного на pad
+    ячеек в пределах растра; None для пустой маски. Вся работа вокруг области
+    идёт в этом окне, а не на полном растре."""
+    rows = np.flatnonzero(mask.any(axis=1))
+    if rows.size == 0:
+        return None
+    cols = np.flatnonzero(mask.any(axis=0))
+    ny, nx = mask.shape
+    return (slice(max(int(rows[0]) - pad, 0), min(int(rows[-1]) + pad, ny - 1) + 1),
+            slice(max(int(cols[0]) - pad, 0), min(int(cols[-1]) + pad, nx - 1) + 1))
 
 
 def _flood_region(free, i0, j0):
@@ -3518,10 +3531,17 @@ def _region_seed_cell(wall, i0, j0, radius=REGION_SEED_SEARCH):
 def _region_center(mask):
     """Ячейка (i, j) области, самая далёкая от её границы и ближайшая к центру
     масс среди таких - место для подписи площади."""
-    ny, nx = mask.shape
-    blocked = ~mask
-    jj = np.broadcast_to(np.arange(nx)[None, :], mask.shape)
-    ii = np.broadcast_to(np.arange(ny)[:, None], mask.shape)
+    # Считаем в окне маски с запасом в одну ячейку: за прямоугольником маски всё
+    # занято, как и за краем растра, поэтому расстояния до границы те же
+    win = _mask_window(mask, 1)
+    if win is None:
+        return None
+    oi, oj = win[0].start, win[1].start
+    sub = mask[win]
+    ny, nx = sub.shape
+    blocked = ~sub
+    jj = np.broadcast_to(np.arange(nx)[None, :], sub.shape)
+    ii = np.broadcast_to(np.arange(ny)[:, None], sub.shape)
     left = jj - np.maximum.accumulate(np.where(blocked, jj, -1), axis=1)
     right = np.minimum.accumulate(np.where(blocked, jj, nx)[:, ::-1], axis=1)[:, ::-1] - jj
     down = ii - np.maximum.accumulate(np.where(blocked, ii, -1), axis=0)
@@ -3532,7 +3552,13 @@ def _region_center(mask):
     if best <= 0:
         return None
     cand = np.argwhere(score >= best * 0.85)
-    ci, cj = np.argwhere(mask).mean(axis=0)
+    cand[:, 0] += oi
+    cand[:, 1] += oj
+    # Центр масс в координатах растра: целочисленные суммы, деление как у mean
+    mi, mj = np.nonzero(sub)
+    n = mi.size
+    ci = (int(mi.sum()) + oi * n) / n
+    cj = (int(mj.sum()) + oj * n) / n
     d = (cand[:, 0] - ci) ** 2 + (cand[:, 1] - cj) ** 2
     i, j = cand[int(np.argmin(d))]
     return int(i), int(j)
@@ -4448,31 +4474,43 @@ def _plot_function_impl(fig=None):
             res[ok] = mask[i[ok], j[ok]]
             return res
 
+        win = _mask_window(mask, 0)
+        if win is None:
+            return
+        j_lo, j_hi = win[1].start, win[1].stop
+
+        def in_window(xa):
+            """Точки, чей столбец растра лежит в прямоугольнике маски: остальные
+            заведомо снаружи, их не считаем (срез непрерывен - столбец монотонен по x)."""
+            j = np.floor((xa - X_LIM_L) / dx).astype(np.int64)
+            sel = np.flatnonzero((j >= j_lo) & (j < j_hi))
+            return (int(sel[0]), int(sel[-1]) + 1) if sel.size else (0, 0)
+
         if style == 2:
             dot_dx = max(step_px / np.sqrt(2) / sx, 1e-9)
             xs_lat = X_LIM_L + np.arange(0, int(x_span / dot_dx) + 1) * dot_dx
-            px_all, py_all = [], []
-            for c in c_vals:
-                y_lat = sign * k * xs_lat + c
-                ok = inside(xs_lat, y_lat)
-                if ok.any():
-                    px_all.append(xs_lat[ok])
-                    py_all.append(y_lat[ok])
-            if px_all:
-                ax.plot(np.concatenate(px_all), np.concatenate(py_all), '.', color=color,
+            a0, a1 = in_window(xs_lat)
+            xs_lat = xs_lat[a0:a1]
+            # Все линии разом: строка - линия, столбец - узел решётки
+            Y_lat = sign * k * xs_lat[None, :] + c_vals[:, None]
+            X_lat = np.broadcast_to(xs_lat, Y_lat.shape)
+            ok = inside(X_lat, Y_lat)
+            if ok.any():
+                ax.plot(X_lat[ok], Y_lat[ok], '.', color=color,
                         markersize=2.2, linewidth=0, zorder=4)
             return
         xs = np.linspace(X_LIM_L, X_LIM_R, 2 * nx + 1)        # шаг - полклетки
+        a0, a1 = in_window(xs)
+        xs = xs[a0:a1]
+        # Все линии разом: строка - линия; отрезки штриховки - серии True в строке
+        Ys = sign * k * xs[None, :] + c_vals[:, None]
+        ok = inside(np.broadcast_to(xs, Ys.shape), Ys)
         segs = []
-        for c in c_vals:
-            ys = sign * k * xs + c
-            ok = inside(xs, ys)
-            if not ok.any():
-                continue
-            d = np.diff(np.concatenate(([0], ok.view(np.int8), [0])))
-            for a, b in zip(np.flatnonzero(d == 1), np.flatnonzero(d == -1)):
+        if ok.any():
+            rr, ss, ee = _runs_along_rows(ok)
+            for r, a, b in zip(rr, ss, ee):
                 if b - a >= 2:
-                    segs.append(np.column_stack((xs[a:b], ys[a:b])))
+                    segs.append(np.column_stack((xs[a:b], Ys[r, a:b])))
         if segs:
             from matplotlib.collections import LineCollection
             ax.add_collection(LineCollection(segs, colors=[color], linewidths=0.6, zorder=4),
@@ -4489,10 +4527,19 @@ def _plot_function_impl(fig=None):
         """
         cell = dx * dy
         area = float(np.count_nonzero(mask)) * cell
-        near = _dilate4(mask) & wall
-        if not near.any():
+        # Соседи маски лежат в её прямоугольнике с запасом в одну ячейку:
+        # считаем их там, а не на полном растре
+        win = _mask_window(mask, 1)
+        if win is None:
             return area
-        b_ids = set(int(v) for v in np.unique(ids[near])) | set(int(v) for v in np.unique(ids2[near]))
+        oi, oj = win[0].start, win[1].start
+        near_w = _dilate4(mask[win]) & wall[win]
+        ni, nj = np.nonzero(near_w)
+        if ni.size == 0:
+            return area
+        ni = ni + oi
+        nj = nj + oj
+        b_ids = set(int(v) for v in np.unique(ids[ni, nj])) | set(int(v) for v in np.unique(ids2[ni, nj]))
         b_ids -= {REGION_ID_NONE, REGION_ID_MULTI}
         # Знаковые функции всех кривых окна (не только граничных): область лежит по
         # одну сторону от каждой из них, и это отсекает «чужие» ячейки у углов, где
@@ -4512,9 +4559,9 @@ def _plot_function_impl(fig=None):
                 Fs[c] = F
         # Сторона области для каждой кривой: знак F в ячейках маски у границы;
         # 0 - знак не постоянен (кривая обрывается внутри области) или неизвестен
-        mi, mj = np.nonzero(_dilate4(near) & mask)
-        xm = X_LIM_L + (mj + 0.5) * dx
-        ym = Y_LIM_B + (mi + 0.5) * dy
+        mi, mj = np.nonzero(_dilate4(near_w) & mask[win])
+        xm = X_LIM_L + (mj + oj + 0.5) * dx
+        ym = Y_LIM_B + (mi + oi + 0.5) * dy
         side = {}
         for c, F in Fs.items():
             try:
@@ -4531,31 +4578,54 @@ def _plot_function_impl(fig=None):
         # больше кривых) плюс свободные ячейки, отрезанные от маски полосой стены
         # (карманы у острых углов, тонкие клинья у касаний), - все с нужной стороны
         # остальных кривых: проверка по всем кривым не даёт уйти в соседнюю область
-        cand = (wall & np.isin(ids, list(b_ids))
-                & (np.isin(ids2, list(b_ids)) | (ids2 == REGION_ID_NONE) | (ids2 == REGION_ID_MULTI)))
-        cand |= ~wall & ~mask
-        ci, cj = np.nonzero(cand)
-        if ci.size:
+        # Полоса растёт от near по 8 соседям; кандидатов проверяем лениво - только
+        # на фронте роста (знаковые функции считаются на сотнях ячеек, а не на
+        # всём растре), каждую ячейку не больше одного раза
+        b_list = list(b_ids)
+        tests = [(c, F, side[c]) for c, F in Fs.items() if side[c] != 0]
+        band = np.zeros((ny, nx), dtype=bool)
+        band[ni, nj] = True
+        seen = band.copy()                      # ячейки, судьба которых уже решена
+        fi, fj = ni, nj                         # фронт: ячейки, добавленные последними
+        bi0, bi1, bj0, bj1 = int(ni.min()), int(ni.max()), int(nj.min()), int(nj.max())
+        d8 = np.array([-1, -1, -1, 0, 0, 1, 1, 1]), np.array([-1, 0, 1, -1, 1, -1, 0, 1])
+        for _ in range(4 * (nx + ny)):          # полоса стены 8-связна - идём по 8 соседям
+            ci = (fi[:, None] + d8[0][None, :]).ravel()
+            cj = (fj[:, None] + d8[1][None, :]).ravel()
+            ok = (ci >= 0) & (ci < ny) & (cj >= 0) & (cj < nx)
+            lin = np.unique(ci[ok] * nx + cj[ok])
+            ci, cj = lin // nx, lin % nx
+            ok = ~seen[ci, cj]
+            ci, cj = ci[ok], cj[ok]
+            if ci.size == 0:
+                break
+            seen[ci, cj] = True
+            w = wall[ci, cj]
+            own1, own2 = ids[ci, cj], ids2[ci, cj]
+            keep = ((w & np.isin(own1, b_list)
+                     & (np.isin(own2, b_list) | (own2 == REGION_ID_NONE) | (own2 == REGION_ID_MULTI)))
+                    | (~w & ~mask[ci, cj]))
+            ci, cj, own1, own2 = ci[keep], cj[keep], own1[keep], own2[keep]
+            if ci.size == 0:
+                break
             xc = X_LIM_L + (cj + 0.5) * dx
             yc = Y_LIM_B + (ci + 0.5) * dy
-            own1, own2 = ids[ci, cj], ids2[ci, cj]
             keep = np.ones(ci.size, dtype=bool)
-            for c, F in Fs.items():
-                if side[c] == 0:
-                    continue
+            for c, F, s in tests:
                 try:
-                    v = F(xc, yc) * side[c]
+                    v = F(xc, yc) * s
                 except Exception:
                     continue
                 keep &= ~(np.isfinite(v) & (v < 0) & (own1 != c) & (own2 != c))
-            cand[ci[~keep], cj[~keep]] = False
-        band = near.copy()
-        for _ in range(4 * (nx + ny)):          # полоса стены 8-связна - идём по 8 соседям
-            new = _dilate8(band) & cand & ~band
-            if not new.any():
+            fi, fj = ci[keep], cj[keep]
+            if fi.size == 0:
                 break
-            band |= new
-        bi, bj = np.nonzero(band)
+            band[fi, fj] = True
+            bi0, bi1 = min(bi0, int(fi.min())), max(bi1, int(fi.max()))
+            bj0, bj1 = min(bj0, int(fj.min())), max(bj1, int(fj.max()))
+        bi, bj = np.nonzero(band[bi0:bi1 + 1, bj0:bj1 + 1])
+        bi = bi + bi0
+        bj = bj + bj0
         id1, id2 = ids[bi, bj], ids2[bi, bj]
         is_wall = wall[bi, bj]
         x0 = X_LIM_L + bj * dx
@@ -4613,7 +4683,15 @@ def _plot_function_impl(fig=None):
         sympy.integrate в фоновом потоке (sym_cached); принимается, если
         совпадает с численной площадью. Возвращает точную форму или None.
         """
-        cols, s, e = _runs_along_rows(mask.T)           # вертикальные отрезки: столбец, i_от, i_до
+        win = _mask_window(mask, 0)
+        if win is None:
+            return None
+        # вертикальные отрезки: столбец, i_от, i_до (ищем в прямоугольнике маски,
+        # индексы возвращаем в координаты растра)
+        cols, s, e = _runs_along_rows(mask[win].T)
+        cols = cols + win[1].start
+        s = s + win[0].start
+        e = e + win[0].start
         if cols.size == 0 or np.unique(cols).size != cols.size:
             return None                                 # пусто или где-то два отрезка в столбце
         order = np.argsort(cols)
@@ -4777,8 +4855,11 @@ def _plot_function_impl(fig=None):
         """Цвет области: цвет кривой с наименьшим индексом среди её границ,
         иначе цвет осей темы."""
         try:
-            near = _dilate4(mask) & wall
-            border = np.concatenate((ids[near], ids2[near]))
+            win = _mask_window(mask, 1)
+            if win is None:
+                return LABEL_COLOR
+            near = _dilate4(mask[win]) & wall[win]
+            border = np.concatenate((ids[win][near], ids2[win][near]))
             cids = border[border >= 0]
             if cids.size:
                 return curve_meta[int(cids.min())]['color']
