@@ -3309,6 +3309,40 @@ def _vline_exact(func_str):
         return None
 
 
+def _frame_axes(fig):
+    """Оси для кадра на переданной фигуре (режим GUI).
+
+    Если на фигуре ровно одни оси, созданные здесь же для прошлого кадра, и на
+    уровне фигуры ничего нет, с них снимаются все артисты прошлого кадра
+    (кривые, подписи, сетка, штриховка, слои подсветки из приложения) и они
+    используются снова: fig.clear() + add_subplot строят новый Axes вместе с
+    его объектами Tick и стоят ~10 мс на кадр, снятие артистов - меньше 1 мс.
+    Пределы, аспект, положение, цвет фона, локаторы и видимость осей кадр
+    задаёт заново сам, обработчики мыши прошлого кадра отключает
+    _disconnect_previous. В остальных случаях (первый кадр, чужие оси,
+    легенда, вложенные оси, артисты на уровне фигуры) - fig.clear() и новые оси.
+    """
+    axes = fig.axes
+    if (len(axes) == 1 and getattr(axes[0], '_fv_frame_axes', False)
+            and not (fig.texts or fig.legends or fig.images or fig.patches
+                     or fig.lines or fig.artists or fig.subfigs)
+            and axes[0].get_legend() is None and not axes[0].child_axes):
+        ax = axes[0]
+        try:
+            for a in [*ax.lines, *ax.texts, *ax.collections, *ax.patches,
+                      *ax.images, *ax.artists, *ax.tables]:
+                a.remove()
+            ax.relim()                  # пределы данных как у новых осей
+            ax.set_prop_cycle(None)     # цикл цветов как у новых осей
+            return ax
+        except Exception:
+            pass
+    fig.clear()
+    ax = fig.add_subplot(111)
+    ax._fv_frame_axes = True
+    return ax
+
+
 def _disconnect_previous():
     """Отписывает интерактивные объекты предыдущего построения."""
     global _active_free_text_manager, _active_axis_label_manager
@@ -3869,8 +3903,7 @@ def _plot_function_impl(fig=None):
     if standalone:
         fig, ax = plt.subplots(figsize=(6, 6))
     else:
-        fig.clear()
-        ax = fig.add_subplot(111)
+        ax = _frame_axes(fig)
     ax.set_facecolor(FIG_BG)
     fig.patch.set_facecolor(FIG_BG)
 
@@ -3927,15 +3960,35 @@ def _plot_function_impl(fig=None):
         pad = step * EDGE_FRACTION
         return _multiples_in(lim_lo + pad - 1e-9, lim_hi - pad + 1e-9, step)
 
+    # Сетку рисуем сами одной LineCollection (gid 'grid'), а не через ax.grid():
+    # механизм Axis/Tick пересобирает 20-30 объектов Tick на каждом кадре и
+    # стоит 5-9 мс на отрисовке. Оси Axis скрыты целиком (деления, подписи и
+    # спайны и так выключены), но FixedLocator остаётся: по
+    # ax.xaxis.get_majorticklocs() позиции сетки читают тесты и внешний код.
+    # Отрезки в координатах данных от края до края окна; как у штатных линий
+    # сетки, торцы выступающие (projecting) и отсечение по рамке осей (его
+    # add_collection ставит сам), иначе концы отличаются на пиксель.
+    ax.grid(False)
+    ax.xaxis.set_visible(False)
+    ax.yaxis.set_visible(False)
     if GRID:
         x_grid_vals = make_ticks_for_grid(X_LIM_L, X_LIM_R, X_GRID)
         y_grid_vals = make_ticks_for_grid(Y_LIM_B, Y_LIM_T, Y_GRID)
         ax.xaxis.set_major_locator(ticker.FixedLocator(x_grid_vals))
         ax.yaxis.set_major_locator(ticker.FixedLocator(y_grid_vals))
-        ax.grid(True, which='major', color=GRID_COLOR, linewidth=0.6,
-                linestyle='-', zorder=1)
+        grid_segs = ([((v, Y_LIM_B), (v, Y_LIM_T)) for v in x_grid_vals]
+                     + [((X_LIM_L, v), (X_LIM_R, v)) for v in y_grid_vals])
+        if grid_segs:
+            from matplotlib.collections import LineCollection
+            grid_lc = LineCollection(grid_segs, colors=[GRID_COLOR], linewidths=0.6,
+                                     linestyles='-', zorder=1, capstyle='projecting')
+            grid_lc.set_gid('grid')
+            ax.add_collection(grid_lc, autolim=False)
     else:
-        ax.grid(False)
+        # на переиспользуемых осях снимаем FixedLocator прошлого кадра, чтобы
+        # get_majorticklocs() отвечал как у новых осей
+        ax.xaxis.set_major_locator(ticker.AutoLocator())
+        ax.yaxis.set_major_locator(ticker.AutoLocator())
 
     # Позиции осей
     x_axis_y = max(Y_LIM_B, min(Y_LIM_T, 0.0))
@@ -3971,19 +4024,30 @@ def _plot_function_impl(fig=None):
         # к краю), кроме нуля
         return [v for v in make_ticks_for_grid(lim_lo, lim_hi, step) if abs(v) > 1e-9]
 
-    for v in make_ticks(X_LIM_L, X_LIM_R, X_GRID):
-        if not X_HIDE and not AXES_HIDDEN:
-            ax.plot(v, x_axis_y, '|', color=LABEL_COLOR, markersize=4, markeredgewidth=0.8, zorder=5)
-            ax.annotate(tick_label(v), xy=(v, x_axis_y),
-                        xytext=(0, -6), textcoords='offset points',
-                        ha='center', va='top', fontsize=TICK_FS, color=LABEL_COLOR)
+    # Штрихи делений: одна Line2D с маркерами на ось вместо Line2D на каждое
+    # деление. Подписи: ax.text со сдвигом в пунктах через ScaledTranslation
+    # вместо ax.annotate (Annotation.draw стоит ~1 мс на подпись: проверка
+    # annotation_clip и пересчёт позиции); пиксельные позиции те же.
+    # Подписи у края окна отсекает правило четверти шага (make_ticks), а не
+    # клиппинг: annotate их никогда не резал, ax.text по умолчанию не режет.
+    import matplotlib.transforms as _mtr
+    x_ticks = make_ticks(X_LIM_L, X_LIM_R, X_GRID)
+    if x_ticks and not X_HIDE and not AXES_HIDDEN:
+        ax.plot(x_ticks, [x_axis_y] * len(x_ticks), '|',
+                color=LABEL_COLOR, markersize=4, markeredgewidth=0.8, zorder=5)
+        _tr = ax.transData + _mtr.ScaledTranslation(0.0, -6.0 / 72.0, fig.dpi_scale_trans)
+        for v in x_ticks:
+            ax.text(v, x_axis_y, tick_label(v), transform=_tr,
+                    ha='center', va='top', fontsize=TICK_FS, color=LABEL_COLOR)
 
-    for v in make_ticks(Y_LIM_B, Y_LIM_T, Y_GRID):
-        if not Y_HIDE and not AXES_HIDDEN:
-            ax.plot(y_axis_x, v, '_', color=LABEL_COLOR, markersize=4, markeredgewidth=0.8, zorder=5)
-            ax.annotate(tick_label(v), xy=(y_axis_x, v),
-                        xytext=(-6, 0), textcoords='offset points',
-                        ha='right', va='center', fontsize=TICK_FS, color=LABEL_COLOR)
+    y_ticks = make_ticks(Y_LIM_B, Y_LIM_T, Y_GRID)
+    if y_ticks and not Y_HIDE and not AXES_HIDDEN:
+        ax.plot([y_axis_x] * len(y_ticks), y_ticks, '_',
+                color=LABEL_COLOR, markersize=4, markeredgewidth=0.8, zorder=5)
+        _tr = ax.transData + _mtr.ScaledTranslation(-6.0 / 72.0, 0.0, fig.dpi_scale_trans)
+        for v in y_ticks:
+            ax.text(y_axis_x, v, tick_label(v), transform=_tr,
+                    ha='right', va='center', fontsize=TICK_FS, color=LABEL_COLOR)
 
     # ── Вспомогательные функции подписи ──────────
     TEX = bool(MATHTEXT_LABELS)
