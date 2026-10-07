@@ -1380,7 +1380,7 @@ class ParamRow:
 
     def _released(self, _e=None):
         """Ползунок отпущен: полный кадр без задержки."""
-        self.on_change(delay=0)
+        self.on_change(delay=0, released=True)
 
     def _range_changed(self, notify=True):
         rng = self._range()
@@ -2039,8 +2039,9 @@ class Probe:
     def add_pin(self, pt):
         self.pins.append({'f': int(pt['f']), 'x': float(pt['x']), 'y': float(pt['y'])})
 
-    def draw_pins(self, ax):
-        """Рисует закреплённые щупы на свежепостроенных осях (вызывается из _redraw)."""
+    def draw_pins(self, ax, fast=False):
+        """Рисует закреплённые щупы на свежепостроенных осях (вызывается из _redraw).
+        fast: быстрый кадр с грубой неявной кривой - координаты щупа не переписываем."""
         self._pin_artists = []
         self._hover = None
         self._hover_artists = []
@@ -2051,7 +2052,8 @@ class Probe:
             if res is None:
                 continue
             x, y, color = res
-            pin['x'], pin['y'] = x, y
+            if not fast:
+                pin['x'], pin['y'] = x, y
             artists = self._make_artists(ax, pin['f'], x, y, color, animated=False,
                                          offset=(pin.get('dx', self.LABEL_OFFSET[0]),
                                                  pin.get('dy', self.LABEL_OFFSET[1])))
@@ -2319,7 +2321,7 @@ class App(tk.Tk):
         self._fast_wanted = False         # следующий _redraw: быстрый кадр
         self._settle_job = None           # таймер полного кадра после быстрых
         self._interacting = False         # идёт взаимодействие: рабочий поток ждёт, статус не трогаем
-        self._refine_wanted = False       # рабочий поток досчитал во время взаимодействия
+        self._job_fast = False            # назначенный _redraw_job - быстрый кадр
         self._loading = False
         self._pan = None
         self._pick_row = None             # строка области, ждущая щелчка по графику
@@ -2865,40 +2867,59 @@ class App(tk.Tk):
         if fast:
             self._interacting = True
             self._fast_wanted = True
-            if self._settle_job is not None:
-                try:
-                    self.after_cancel(self._settle_job)
-                except Exception:
-                    pass
+            self._cancel_settle()
             self._settle_job = self.after(SETTLE_DELAY_MS, self._settle)
             if self._drawing:
                 self._redraw_wanted = True        # дорисуем один раз, когда закончим
                 return
             if self._redraw_job is not None:
-                return                            # кадр уже назначен
+                if self._job_fast:
+                    return                        # быстрый кадр уже назначен
+                try:                              # назначен отложенный полный кадр: быстрый не ждёт
+                    self.after_cancel(self._redraw_job)
+                except Exception:
+                    pass
+            self._job_fast = True
             self._redraw_job = self.after(1, self._redraw)
             return
         self._fast_wanted = False
+        self._cancel_settle()
+        if self._redraw_job is not None:
+            try:
+                self.after_cancel(self._redraw_job)
+            except Exception:
+                pass
+        self._job_fast = False
+        self._redraw_job = self.after(REDRAW_DELAY_MS if delay is None else delay, self._redraw)
+
+    def _settle(self):
+        """Движение ползунка замерло: полный кадр (при перетаскивании графика
+        полный кадр даст отпускание кнопки)."""
+        self._settle_job = None
+        if self._pan is not None:
+            return
+        self.schedule_redraw(delay=0)
+
+    def _cancel_settle(self):
         if self._settle_job is not None:
             try:
                 self.after_cancel(self._settle_job)
             except Exception:
                 pass
             self._settle_job = None
-        if self._redraw_job is not None:
-            try:
-                self.after_cancel(self._redraw_job)
-            except Exception:
-                pass
-        self._redraw_job = self.after(REDRAW_DELAY_MS if delay is None else delay, self._redraw)
 
-    def _settle(self):
-        """Движение ползунка замерло: полный кадр."""
-        self._settle_job = None
-        self.schedule_redraw(delay=0)
+    def _ensure_full_frame(self):
+        """Перед экспортом, таблицей и сохранением: если последний кадр был
+        быстрым, сначала полный кадр (подписи, точки, площади)."""
+        if self._interacting and not self._drawing:
+            self._cancel_settle()
+            self._fast_wanted = False
+            self._redraw()
 
     def redraw_now(self):
-        """Немедленная перерисовка (минуя debounce) — после пана/зума."""
+        """Немедленная полная перерисовка (минуя debounce) — после пана/зума."""
+        self._fast_wanted = False
+        self._cancel_settle()
         if self._redraw_job is not None:
             try:
                 self.after_cancel(self._redraw_job)
@@ -2996,7 +3017,9 @@ class App(tk.Tk):
             outer.pack_forget()
         return {name: repr(round(self.param_rows[name].get(), 6)) for name in names}
 
-    def _param_changed(self, delay=None, fast=False):
+    def _param_changed(self, delay=None, fast=False, released=False):
+        if released and not self._interacting:
+            return                                # щелчок по ползунку без движения
         self.schedule_redraw(delay=delay, fast=fast)
 
     def _apply_to_engine(self, s):
@@ -3067,9 +3090,13 @@ class App(tk.Tk):
                 return
             self._last_good = settings
             try:
-                self.probe.draw_pins(result['ax'])
+                self.probe.draw_pins(result['ax'], fast=fast)
             except Exception:
                 log_exception("probe.draw_pins")
+            errors = result.get('errors', {}) or {}
+            for idx, r in enumerate(self.func_rows):
+                if idx in errors and not r.is_empty():
+                    r.editor.set_error(he_display(tr_err(errors[idx])))
             if fast:
                 # быстрый кадр: только кривые и заливки; площади, подписи и
                 # символьные задания - в полном кадре после остановки
@@ -3082,14 +3109,8 @@ class App(tk.Tk):
                 if self._preview is not None:
                     self._preview.hide()
                 return
-            self._interacting = False
             for i, fr in enumerate(self.fill_rows):
                 fr.set_area(fv.LAST_FILL_AREAS.get(i))
-
-            errors = result.get('errors', {}) or {}
-            for idx, r in enumerate(self.func_rows):
-                if idx in errors and not r.is_empty():
-                    r.editor.set_error(he_display(tr_err(errors[idx])))
             # Синхронная отрисовка: новый кадр готов сразу, и предпросмотр
             # (сдвинутый/масштабированный старый кадр) можно убрать без «моргания».
             try:
@@ -3104,10 +3125,6 @@ class App(tk.Tk):
             if result.get('pending'):
                 self._submit_jobs(fv.take_pending_jobs())
                 self._set_status(T("Refining labels (symbolic analysis)…"))
-            elif self._refine_wanted:
-                # рабочий поток досчитал что-то во время перетаскивания: кадр уже
-                # взял результаты из кэша, повторная перерисовка не нужна
-                self._refine_wanted = False
             elif errors or self._incomplete_rows:
                 self._set_status(T("Some functions are incomplete or invalid - hover the red field"),
                                  ERR_COLOR)
@@ -3115,9 +3132,14 @@ class App(tk.Tk):
                 self._set_status(T("Ready") + self._visible_range_note(result.get('ax')))
         finally:
             self._drawing = False
+            if not fast:
+                # взаимодействие закончено полным кадром (каким бы он ни был):
+                # рабочий поток снова может считать
+                self._interacting = False
             if self._redraw_wanted and (self._pan is None or self._fast_wanted):
                 self._redraw_wanted = False
                 if self._fast_wanted:
+                    self._job_fast = True
                     self._redraw_job = self.after(1, self._redraw)     # хвостовой быстрый кадр
                 else:
                     self.schedule_redraw()
@@ -3273,6 +3295,15 @@ class App(tk.Tk):
             self._jobs_event.wait()
             if self._worker is not me:          # нас заменил сторож — выходим
                 return
+            # Пока пользователь тянет ползунок, чистый Python в этом потоке отнимает
+            # GIL у отрисовки (кадры замедляются в разы) - ждём ДО взятия пачки, чтобы
+            # сторож не счёл ожидание зависанием, а после ожидания взять самую свежую
+            # пачку (прежняя относится к уже не показанному значению). Ожидание
+            # ограничено: застрявший флаг не должен остановить расчёт навсегда.
+            waited = 0.0
+            while self._interacting and self._worker is me and waited < 3.0:
+                time.sleep(0.03)
+                waited += 0.03
             with self._jobs_lock:
                 if not self._job_batches:
                     self._jobs_event.clear()
@@ -3282,10 +3313,6 @@ class App(tk.Tk):
                 self._running_keys.update(keys)
                 self._active_batch = (seq, keys, time.time())
             try:
-                # Пока пользователь тянет ползунок, чистый Python в этом потоке
-                # отнимает GIL у отрисовки (кадры замедляются в разы) - ждём
-                while self._interacting and self._worker is me:
-                    time.sleep(0.03)
                 fv.run_jobs(jobs)
             except Exception:
                 log_exception("symbolic worker")
@@ -3307,11 +3334,10 @@ class App(tk.Tk):
                 got = True
         except queue.Empty:
             pass
-        if got:
-            if self._interacting:
-                self._refine_wanted = True        # перерисуем полным кадром после остановки
-            else:
-                self.schedule_redraw()
+        if got and not self._interacting:
+            # во время перетаскивания результаты относятся к прежним значениям:
+            # полный кадр после остановки сам возьмёт из кэша всё готовое
+            self.schedule_redraw()
 
         # Сторож: sympy иногда «уходит в себя» на минуты (simplify громоздких
         # радикалов и т.п.). Тогда помечаем невычисленные ключи пачки как
@@ -3511,8 +3537,19 @@ class App(tk.Tk):
         lims = self._current_limits()
         if lims is None:
             return
+        # Масштаб (единиц данных на пиксель) запоминаем сразу: быстрые кадры
+        # пересоздают оси, и transData захваченных осей становится негодным
+        try:
+            ax0 = event.inaxes
+            bb = ax0.get_window_extent()
+            exl, exr = ax0.get_xlim(); eyb, eyt = ax0.get_ylim()
+            sx = (exr - exl) / max(1.0, bb.width)
+            sy = (eyt - eyb) / max(1.0, bb.height)
+        except Exception:
+            sx = sy = None
         self._pan = {"x0": event.xdata, "y0": event.ydata, "px": event.x, "py": event.y,
-                     "lims": lims, "moved": False, "ax": event.inaxes, "preview": False}
+                     "lims": lims, "moved": False, "ax": event.inaxes, "preview": False,
+                     "sx": sx, "sy": sy}
 
     def _probe_menu(self, event, i):
         menu = tk.Menu(self, tearoff=0)
@@ -3535,12 +3572,16 @@ class App(tk.Tk):
         if not p["moved"] and abs(event.x - p["px"]) < 4 and abs(event.y - p["py"]) < 4:
             return
         p["moved"] = True
-        ax = p["ax"]
-        # переводим сдвиг в пикселях в единицы данных (по масштабу осей на момент захвата)
-        inv = ax.transData.inverted()
-        x1, y1 = inv.transform((event.x, event.y))
-        x0, y0 = inv.transform((p["px"], p["py"]))
-        dx, dy = x1 - x0, y1 - y0
+        ax = self.fig.axes[0] if self.fig.axes else p["ax"]
+        # переводим сдвиг в пикселях в единицы данных (по масштабу на момент захвата)
+        if p.get("sx") is not None:
+            dx = (event.x - p["px"]) * p["sx"]
+            dy = (event.y - p["py"]) * p["sy"]
+        else:
+            inv = ax.transData.inverted()
+            x1, y1 = inv.transform((event.x, event.y))
+            x0, y0 = inv.transform((p["px"], p["py"]))
+            dx, dy = x1 - x0, y1 - y0
         xl, xr, yb, yt = p["lims"]
         p["cur"] = (xl - dx, xr - dx, yb - dy, yt - dy)
         if _ENGINE_FAST:
@@ -3606,6 +3647,7 @@ class App(tk.Tk):
     # ── экспорт: картинка (файл / буфер обмена) и таблица значений ──
     def render_image(self, fmt="png", scale=2, transparent=False):
         """Байты картинки текущего графика. scale — во сколько раз крупнее экрана (PNG)."""
+        self._ensure_full_frame()
         import io
         buf = io.BytesIO()
         kw = dict(format=fmt, bbox_inches="tight", pad_inches=0.05)
@@ -3651,6 +3693,7 @@ class App(tk.Tk):
         Таблица значений: (заголовок, строки) по видимым функциям на сетке
         текущего окна (шаг X) плюс особые точки и щупы.
         """
+        self._ensure_full_frame()
         ax = self.fig.axes[0] if self.fig.axes else None
         if ax is None:
             return [], []
@@ -3730,6 +3773,7 @@ class App(tk.Tk):
         }
 
     def _save_project(self):
+        self._ensure_full_frame()
         path = filedialog.asksaveasfilename(
             title=he_display(T("Save project")), defaultextension=self.PROJECT_EXT,
             filetypes=[(he_display(T("Function Visualizer project")), "*" + self.PROJECT_EXT), ("JSON", "*.json")],
@@ -3863,7 +3907,8 @@ class App(tk.Tk):
         self._on_close()
 
     def _on_close(self):
-        for job in (self._redraw_job, getattr(self, "_poll_job", None), self._tl_job):
+        for job in (self._redraw_job, getattr(self, "_poll_job", None), self._tl_job,
+                    getattr(self, "_settle_job", None)):
             try:
                 if job is not None:
                     self.after_cancel(job)
