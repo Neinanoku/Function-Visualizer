@@ -1384,3 +1384,95 @@ def test_region_raster_helpers_match_dense_references():
     m[0:2, nx - 3:nx] = True
     assert fv._mask_window(m, 1) == (slice(0, 3), slice(nx - 4, nx))
     assert fv._mask_window(np.zeros((ny, nx), dtype=bool)) is None
+
+
+# ═════════════════════════════════════════════════════════════
+#  Быстрые кадры (взаимодействие): fast=True и blit статического слоя
+# ═════════════════════════════════════════════════════════════
+
+def _frame_fig():
+    fig = Figure(figsize=(8, 6), dpi=100)
+    canvas = FigureCanvasAgg(fig)
+    return fig, canvas
+
+
+def test_fast_frame_skips_analysis_keeps_curves():
+    """fast=True: кривые, вертикали, неявные кривые и штриховка есть, особых точек, подписей,
+    пересечений и площадей нет; LAST_POINTS/LAST_FILL_AREAS остаются от полного кадра;
+    символьных заданий не остаётся; ошибки формул по-прежнему сообщаются."""
+    fig, canvas = _frame_fig()
+    fv.PARAMS = {"a": "1.0"}
+    full = draw(["a*x^2 - 1", "x=1", "x^2+y^2=9", "1/0"], fig=fig, FILL=[fv.region_fill(0.5, -0.5)], INTER=True)
+    assert 3 in full['errors']
+    pts_full = dict(fv.LAST_POINTS); areas_full = dict(fv.LAST_FILL_AREAS)
+    assert pts_full and areas_full[0] is not None
+    n_curves_full = len(curve_lines(full['ax']))
+    fv.SYMBOLIC_MODE = 'cached'
+    fv.PARAMS = {"a": "1.5"}
+    res = fv.plot_function(fig, fast=True)
+    ax = res['ax']
+    assert res['pending'] is False and not fv._PENDING
+    assert 3 in res['errors']                                   # ошибка формулы видна и в быстром кадре
+    assert len(curve_lines(ax)) == n_curves_full                # кривые на месте
+    assert any(list(l.get_xdata()) == [1.0, 1.0] for l in ax.lines)   # вертикаль
+    assert any(isinstance(c, matplotlib.collections.LineCollection) for c in ax.collections)  # неявная + штриховка
+    assert hatch_lines(ax)                                       # штриховка области есть
+    texts = [t.get_text() for t in ax.texts]
+    assert not any(t.startswith(("(", "$(")) for t in texts)    # подписей точек нет
+    assert not [l for l in ax.lines if l.get_marker() == 'o']   # маркеров точек нет
+    assert fv.LAST_POINTS == pts_full and fv.LAST_FILL_AREAS == areas_full   # значения полного кадра
+    assert fv.LAST_CURVES[0]['kind'] == 'func' and fv.LAST_CURVES[2]['kind'] == 'implicit'
+    assert fv.LAST_CURVES[2]['segs'] and fv._REGION_CONTEXT     # щуп и подсветка работают
+    assert fv._eval_array(fv.LAST_CURVES[0]['f'], np.array([2.0]))[0] == pytest.approx(5.0)   # a = 1.5 подставлено
+    # полный кадр после быстрого снова считает точки и площади
+    fv.SYMBOLIC_MODE = 'compute'
+    full2 = fv.plot_function(fig)
+    assert fv.LAST_POINTS and fv.LAST_FILL_AREAS[0] is not None and len(fv.LAST_POINTS) >= 1
+    assert any(t.get_text().startswith(("(", "$(")) for t in full2['ax'].texts)
+
+
+def test_fast_frame_blit_reuses_static_layer():
+    """Быстрые кадры подряд: статический слой (сетка, деления, подписи делений, названия осей)
+    остаётся теми же артистами, динамические заменяются, артисты не копятся, present_fast
+    выводит кадр; смена пределов или полный кадр перестраивают статический слой."""
+    import matplotlib.collections as mcoll
+    fig, canvas = _frame_fig()
+    fv.PARAMS = {"a": "1.0"}
+    draw(["a*x^2", "sin(x)"], fig=fig)
+    canvas.draw()
+    fv.PARAMS = {"a": "1.2"}
+    r1 = fv.plot_function(fig, fast=True)
+    assert r1['fast_blit'] and fv._FAST_STATE['valid']
+    ax = r1['ax']
+    grid1 = grid_collection(ax)
+    tick_texts1 = [t for t in ax.texts if t.get_text() in ("1", "2", "3", "-1")]
+    curve1 = curve_lines(ax)[0]
+    assert fv.present_fast(fig) is True and fv._FAST_STATE['bg'] is not None
+    img_blit = np.array(canvas.buffer_rgba()).copy()
+    n_art = len(fv._axes_artists(ax))
+    for i in range(10):
+        fv.PARAMS = {"a": repr(1.2 + 0.02 * i)}
+        r = fv.plot_function(fig, fast=True)
+        assert r['ax'] is ax and r['fast_blit']
+        assert fv.present_fast(fig) is True
+    assert len(fv._axes_artists(ax)) == n_art                   # динамические артисты не копятся
+    assert grid_collection(ax) is grid1                          # сетка - тот же объект
+    assert all(t in ax.texts for t in tick_texts1)               # подписи делений - те же
+    assert curve_lines(ax)[0] is not curve1                      # кривая заменена
+    # кадр через blit совпадает с обычной отрисовкой того же состояния
+    fv.PARAMS = {"a": "1.2"}
+    fv.plot_function(fig, fast=True); fv.present_fast(fig)
+    img_blit = np.array(canvas.buffer_rgba()).copy()
+    canvas.draw()
+    img_full = np.array(canvas.buffer_rgba())
+    assert np.array_equal(img_blit, img_full)
+    # смена пределов: новый статический слой
+    fv.X_LIM_L, fv.X_LIM_R = -3, 3
+    r = fv.plot_function(fig, fast=True)
+    assert r['fast_blit'] and grid_collection(r['ax']) is not grid1
+    # полный кадр сбрасывает кэш, следующий быстрый строит статический слой заново
+    fv.plot_function(fig)
+    assert not fv._FAST_STATE['valid']
+    r = fv.plot_function(fig, fast=True)
+    assert r['fast_blit'] and fv._FAST_STATE['valid'] and fv._FAST_STATE['bg'] is None
+    fv.PARAMS = {}

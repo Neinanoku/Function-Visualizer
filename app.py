@@ -28,6 +28,22 @@ import collections
 import numpy as np
 import traceback
 import tkinter as tk
+
+# Сборка мусора может сработать в рабочем потоке (sympy), и финализатор удалённой
+# Tk-переменной (строки панели, пересозданные при загрузке проекта) печатает
+# «RuntimeError: main thread is not in main loop» как «Exception ignored». На
+# работу это не влияет, но засоряет консоль: гасим именно эту ошибку.
+_tk_variable_del = tk.Variable.__del__
+
+
+def _quiet_variable_del(self):
+    try:
+        _tk_variable_del(self)
+    except RuntimeError:
+        pass
+
+
+tk.Variable.__del__ = _quiet_variable_del
 from tkinter import messagebox, filedialog, colorchooser
 
 # ── DPI (Windows) ────────────────────────────────────────────
@@ -3099,12 +3115,26 @@ class App(tk.Tk):
                     r.editor.set_error(he_display(tr_err(errors[idx])))
             if fast:
                 # быстрый кадр: только кривые и заливки; площади, подписи и
-                # символьные задания - в полном кадре после остановки
+                # символьные задания - в полном кадре после остановки.
+                # Вывод через blit статического слоя, иначе обычная отрисовка.
+                shown = False
+                if result.get('fast_blit'):
+                    try:
+                        shown = fv.present_fast(self.fig)
+                    except Exception:
+                        log_exception("present_fast")
+                        shown = False
+                if not shown:
+                    try:
+                        self.canvas.draw()
+                    except Exception:
+                        log_exception("canvas.draw")
+                        self.canvas.draw_idle()
                 try:
-                    self.canvas.draw()
+                    # фон щупа - текущий экран (после blit draw_event не приходит)
+                    self.probe._bg = self.canvas.copy_from_bbox(self.fig.bbox)
                 except Exception:
-                    log_exception("canvas.draw")
-                    self.canvas.draw_idle()
+                    pass
                 self._zoom = None
                 if self._preview is not None:
                     self._preview.hide()
@@ -3923,7 +3953,7 @@ class App(tk.Tk):
 #  ВЫБОР ЯЗЫКА ПРИ ЗАПУСКЕ
 # ═════════════════════════════════════════════════════════════
 
-VERSION = "4.4.2"
+VERSION = "4.5"
 
 # (код, название на самом языке, клавиша)
 LANGUAGES = [("en", "English", "1"), ("he", "עברית", "2"), ("ru", "Русский", "3")]

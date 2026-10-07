@@ -3309,6 +3309,81 @@ def _vline_exact(func_str):
         return None
 
 
+# Быстрые кадры с blit: статический слой (сетка, оси, деления, подписи делений,
+# названия осей, свободные подписи) рисуется один раз и хранится как снимок
+# холста; каждый следующий быстрый кадр с той же подписью (_fast_signature)
+# снимает только динамические артисты прошлого кадра, добавляет новые (кривые,
+# вертикали, неявные кривые, асимптоты, штриховка) и выводит их поверх снимка
+# (present_fast). Любой полный кадр сбрасывает кэш.
+FAST_BLIT = True
+_FAST_STATE = {'valid': False, 'sig': None, 'ax': None, 'bg': None,
+               'static_ids': frozenset(), 'axis_labels': None}
+
+
+def _axes_artists(ax):
+    return [*ax.lines, *ax.texts, *ax.collections, *ax.patches, *ax.images, *ax.artists]
+
+
+def _fast_signature(fig):
+    """Подпись статического слоя: всё, от чего зависят сетка, оси, подписи
+    делений, названия осей и свободные подписи. None - blit невозможен."""
+    try:
+        canvas = fig.canvas
+        if canvas is None or not hasattr(canvas, 'copy_from_bbox') or not hasattr(canvas, 'restore_region'):
+            return None
+        return (round(X_LIM_L, 12), round(X_LIM_R, 12), round(Y_LIM_B, 12), round(Y_LIM_T, 12),
+                bool(GRID), float(X_GRID), float(Y_GRID), FONT_SIZE, PLOT_THEME,
+                bool(AXES_HIDDEN), bool(X_HIDE), bool(Y_HIDE), bool(MATHTEXT_LABELS),
+                float(fig.get_figwidth()), float(fig.get_figheight()), float(fig.dpi),
+                repr(FREE_TEXTS), repr(AXIS_LABELS), repr(ANNOTATION_OFFSETS.get('free_text_rot')))
+    except Exception:
+        return None
+
+
+def invalidate_fast_frame():
+    """Сброс кэша быстрых кадров (следующий быстрый кадр построит статический слой заново)."""
+    _FAST_STATE.update(valid=False, sig=None, bg=None)
+
+
+def present_fast(fig):
+    """
+    Вывод быстрого кадра на холст через blit: снимок статического слоя
+    восстанавливается, динамические артисты дорисовываются поверх и кадр
+    выводится. Первый быстрый кадр после полного рисует статический слой
+    целиком (canvas.draw без динамических артистов) и запоминает снимок.
+    Возвращает True, если кадр выведен; False - приложение рисует canvas.draw().
+    """
+    st = _FAST_STATE
+    canvas = fig.canvas
+    ax = st.get('ax')
+    if (not st.get('valid') or ax is None or not fig.axes or fig.axes[0] is not ax
+            or not hasattr(canvas, 'copy_from_bbox')):
+        return False
+    try:
+        static_ids = st['static_ids']
+        dyn = [a for a in _axes_artists(ax) if id(a) not in static_ids]
+        if st.get('bg') is None:
+            was = [a.get_visible() for a in dyn]
+            for a in dyn:
+                a.set_visible(False)
+            try:
+                canvas.draw()
+                st['bg'] = canvas.copy_from_bbox(fig.bbox)
+            finally:
+                for a, v in zip(dyn, was):
+                    a.set_visible(v)
+        canvas.restore_region(st['bg'])
+        for a in sorted(dyn, key=lambda a: a.get_zorder()):
+            if a.get_visible():
+                ax.draw_artist(a)
+        canvas.blit(fig.bbox)
+        return True
+    except Exception:
+        logging.getLogger(__name__).debug("present_fast failed", exc_info=True)
+        st.update(valid=False, bg=None)
+        return False
+
+
 def _frame_axes(fig):
     """Оси для кадра на переданной фигуре (режим GUI).
 
@@ -3479,10 +3554,15 @@ def effective_limits(w_px, h_px):
     return xl, xr, yb, yt
 
 
-def plot_function(fig=None):
+def plot_function(fig=None, fast=False):
     """
     Строит график по текущим настройкам модуля.
       fig=None — standalone: своя фигура 6×6, plt.show().
+      fast=True — быстрый кадр во время взаимодействия (ползунок, колесо,
+      перетаскивание): только кривые, вертикали, неявные кривые (грубее),
+      асимптоты, штриховка областей (грубее) и свободные подписи. Без особых
+      точек, подписей значений, пересечений, площадей и символьных заданий;
+      LAST_POINTS и LAST_FILL_AREAS остаются от последнего полного кадра.
       fig задана — очищает её, рисует в fig.add_subplot(111), plt.show() НЕ
       вызывает (GUI с встроенным холстом). При EXTEND_TO_CANVAS пределы
       расширяются под пропорции холста (см. effective_limits).
@@ -3503,7 +3583,7 @@ def plot_function(fig=None):
         except Exception:
             X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T = saved
     try:
-        return _plot_function_impl(fig)
+        return _plot_function_impl(fig, fast=fast)
     finally:
         # Настройки пользователя (View Window) не трогаем — вернуть как было
         X_LIM_L, X_LIM_R, Y_LIM_B, Y_LIM_T = saved
@@ -3550,6 +3630,9 @@ def _contour_segments(cs):
 # Стены отмечаются 8-связно, поэтому 4-связная заливка через них не
 # просачивается.
 REGION_MAX_CELLS = 900
+REGION_FAST_CELLS = 400           # растр области в быстром кадре (во время взаимодействия)
+IMPLICIT_FAST_N = 300             # сетка неявной кривой в быстром кадре (600 в полном)
+_LAST_AREA_TEXT = {}              # подписи площадей последнего полного кадра (быстрый кадр их повторяет)
 REGION_MIN_CELLS = 240
 REGION_SEED_SEARCH = 3            # радиус (в ячейках) поиска свободной ячейки у точки на кривой
 REGION_ID_NONE, REGION_ID_MULTI, REGION_ID_X_AXIS, REGION_ID_Y_AXIS = -1, -2, -3, -4
@@ -3874,14 +3957,33 @@ def _bisect_implicit(h, xs, ya, yb, iters=30):
     return res
 
 
-def _plot_function_impl(fig=None):
+def _plot_function_impl(fig=None, fast=False):
     global CURVE_WIDTHS, CURVE_STYLES, CURVE_COLORS
     global _active_free_text_manager, _active_axis_label_manager
 
+    fast = bool(fast)
     _DRAW_STATE['pending'] = False
-    _disconnect_previous()
-    LAST_POINTS.clear()
-    LAST_FILL_AREAS.clear()
+    # Быстрый кадр с той же подписью статического слоя, что и предыдущий быстрый
+    # кадр: статический слой остаётся, меняются только динамические артисты
+    sig = _fast_signature(fig) if (fast and fig is not None and FAST_BLIT) else None
+    incremental = bool(sig is not None and _FAST_STATE.get('valid') and _FAST_STATE.get('sig') == sig
+                       and fig.axes and _FAST_STATE.get('ax') is fig.axes[0])
+    if incremental:
+        # менеджеры свободных подписей и названий осей живут со статическим слоем;
+        # перетаскиваемые подписи прошлого быстрого кадра (площади) отключаем
+        for d in _ACTIVE_DRAGGABLES:
+            try:
+                d.disconnect()
+            except Exception:
+                pass
+        _ACTIVE_DRAGGABLES.clear()
+    else:
+        _disconnect_previous()
+        _FAST_STATE.update(valid=False, bg=None)
+    if not fast:
+        # быстрый кадр не считает точки и площади: оставляем значения полного кадра
+        LAST_POINTS.clear()
+        LAST_FILL_AREAS.clear()
     _REGION_CONTEXT.clear()
     errors = {}
 
@@ -3902,33 +4004,44 @@ def _plot_function_impl(fig=None):
     standalone = fig is None
     if standalone:
         fig, ax = plt.subplots(figsize=(6, 6))
+    elif incremental:
+        ax = fig.axes[0]
+        # снимаем динамические артисты прошлого быстрого кадра (кривые, штриховка,
+        # подписи площадей, щупы приложения); статический слой остаётся
+        for a in _axes_artists(ax):
+            if id(a) not in _FAST_STATE['static_ids']:
+                try:
+                    a.remove()
+                except Exception:
+                    pass
     else:
         ax = _frame_axes(fig)
-    ax.set_facecolor(FIG_BG)
-    fig.patch.set_facecolor(FIG_BG)
+    if not incremental:
+        ax.set_facecolor(FIG_BG)
+        fig.patch.set_facecolor(FIG_BG)
 
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-    ax.tick_params(bottom=False, left=False,
-                   labelbottom=False, labelleft=False)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        ax.tick_params(bottom=False, left=False,
+                       labelbottom=False, labelleft=False)
 
-    ax.set_xlim(X_LIM_L, X_LIM_R)
-    ax.set_ylim(Y_LIM_B, Y_LIM_T)
+        ax.set_xlim(X_LIM_L, X_LIM_R)
+        ax.set_ylim(Y_LIM_B, Y_LIM_T)
 
-    # Область построения занимает всю фигуру за вычетом полей PLOT_MARGIN_PX
-    # с каждой стороны; пределы уже подогнаны под её пропорции
-    # (effective_limits), поэтому при равных диапазонах X и Y клетки сетки
-    # квадратные, а при разных — график растянут так, как задано View Window.
-    ax.set_aspect('auto')
-    try:
-        _W = max(1.0, fig.get_figwidth() * fig.dpi)
-        _H = max(1.0, fig.get_figheight() * fig.dpi)
-        _m = _margin_px(fig)
-        _fx = min(0.45, _m / _W)
-        _fy = min(0.45, _m / _H)
-        fig.subplots_adjust(left=_fx, right=1.0 - _fx, bottom=_fy, top=1.0 - _fy)
-    except Exception:
-        pass
+        # Область построения занимает всю фигуру за вычетом полей PLOT_MARGIN_PX
+        # с каждой стороны; пределы уже подогнаны под её пропорции
+        # (effective_limits), поэтому при равных диапазонах X и Y клетки сетки
+        # квадратные, а при разных — график растянут так, как задано View Window.
+        ax.set_aspect('auto')
+        try:
+            _W = max(1.0, fig.get_figwidth() * fig.dpi)
+            _H = max(1.0, fig.get_figheight() * fig.dpi)
+            _m = _margin_px(fig)
+            _fx = min(0.45, _m / _W)
+            _fy = min(0.45, _m / _H)
+            fig.subplots_adjust(left=_fx, right=1.0 - _fx, bottom=_fy, top=1.0 - _fy)
+        except Exception:
+            pass
     # Размер осей в пикселях — для штриховки под 45° на ЭКРАНЕ и смещений
     # подписей в пунктах при неравных масштабах по X и Y.
     try:
@@ -3968,10 +4081,15 @@ def _plot_function_impl(fig=None):
     # Отрезки в координатах данных от края до края окна; как у штатных линий
     # сетки, торцы выступающие (projecting) и отсечение по рамке осей (его
     # add_collection ставит сам), иначе концы отличаются на пиксель.
-    ax.grid(False)
-    ax.xaxis.set_visible(False)
-    ax.yaxis.set_visible(False)
-    if GRID:
+    if incremental:
+        pass                                    # сетка уже в статическом слое
+    elif True:
+        ax.grid(False)
+        ax.xaxis.set_visible(False)
+        ax.yaxis.set_visible(False)
+    if incremental:
+        pass
+    elif GRID:
         x_grid_vals = make_ticks_for_grid(X_LIM_L, X_LIM_R, X_GRID)
         y_grid_vals = make_ticks_for_grid(Y_LIM_B, Y_LIM_T, Y_GRID)
         ax.xaxis.set_major_locator(ticker.FixedLocator(x_grid_vals))
@@ -3995,7 +4113,7 @@ def _plot_function_impl(fig=None):
     y_axis_x = max(X_LIM_L, min(X_LIM_R, 0.0))
 
     # ── Оси со стрелками ────────────────────────
-    if not AXES_HIDDEN:
+    if not AXES_HIDDEN and not incremental:
         ax.annotate("", xy=(X_LIM_R, x_axis_y), xytext=(X_LIM_L, x_axis_y),
                     arrowprops=dict(arrowstyle='->', color=LABEL_COLOR,
                                     lw=1.2, mutation_scale=12), zorder=4)
@@ -4005,18 +4123,21 @@ def _plot_function_impl(fig=None):
 
     # Подписи осей — в полях, за концами стрелок: «x» справа от стрелки
     # оси X, «y» над стрелкой оси Y. Не перетаскиваются.
-    _axis_label_x = ax.text(X_LIM_R, x_axis_y, "$x$" if MATHTEXT_LABELS else "x",
-                ha='left', va='center', fontsize=AXIS_FS, color=LABEL_COLOR,
-                clip_on=False, zorder=6)
-    _axis_label_y = ax.text(y_axis_x, Y_LIM_T, "$y$" if MATHTEXT_LABELS else "y",
-                ha='center', va='bottom', fontsize=AXIS_FS, color=LABEL_COLOR,
-                clip_on=False, zorder=6)
+    if incremental:
+        _axis_label_x, _axis_label_y = _FAST_STATE['axis_labels']
+    else:
+        _axis_label_x = ax.text(X_LIM_R, x_axis_y, "$x$" if MATHTEXT_LABELS else "x",
+                    ha='left', va='center', fontsize=AXIS_FS, color=LABEL_COLOR,
+                    clip_on=False, zorder=6)
+        _axis_label_y = ax.text(y_axis_x, Y_LIM_T, "$y$" if MATHTEXT_LABELS else "y",
+                    ha='center', va='bottom', fontsize=AXIS_FS, color=LABEL_COLOR,
+                    clip_on=False, zorder=6)
+        if AXES_HIDDEN:
+            # оси скрыты: подписи остаются объектами менеджера, но не рисуются и не ловят мышь
+            _axis_label_x.set_visible(False)
+            _axis_label_y.set_visible(False)
     # Смещения (в пунктах) от концов стрелок.
     _axis_home_offsets = {'x': (3.0, 0.0), 'y': (0.0, 2.0)}
-    if AXES_HIDDEN:
-        # оси скрыты: подписи остаются объектами менеджера, но не рисуются и не ловят мышь
-        _axis_label_x.set_visible(False)
-        _axis_label_y.set_visible(False)
 
     # ── Деления на осях ─────────────────────────
     def make_ticks(lim_lo, lim_hi, step):
@@ -4032,7 +4153,7 @@ def _plot_function_impl(fig=None):
     # клиппинг: annotate их никогда не резал, ax.text по умолчанию не режет.
     import matplotlib.transforms as _mtr
     x_ticks = make_ticks(X_LIM_L, X_LIM_R, X_GRID)
-    if x_ticks and not X_HIDE and not AXES_HIDDEN:
+    if x_ticks and not X_HIDE and not AXES_HIDDEN and not incremental:
         ax.plot(x_ticks, [x_axis_y] * len(x_ticks), '|',
                 color=LABEL_COLOR, markersize=4, markeredgewidth=0.8, zorder=5)
         _tr = ax.transData + _mtr.ScaledTranslation(0.0, -6.0 / 72.0, fig.dpi_scale_trans)
@@ -4041,13 +4162,17 @@ def _plot_function_impl(fig=None):
                     ha='center', va='top', fontsize=TICK_FS, color=LABEL_COLOR)
 
     y_ticks = make_ticks(Y_LIM_B, Y_LIM_T, Y_GRID)
-    if y_ticks and not Y_HIDE and not AXES_HIDDEN:
+    if y_ticks and not Y_HIDE and not AXES_HIDDEN and not incremental:
         ax.plot([y_axis_x] * len(y_ticks), y_ticks, '_',
                 color=LABEL_COLOR, markersize=4, markeredgewidth=0.8, zorder=5)
         _tr = ax.transData + _mtr.ScaledTranslation(-6.0 / 72.0, 0.0, fig.dpi_scale_trans)
         for v in y_ticks:
             ax.text(y_axis_x, v, tick_label(v), transform=_tr,
                     ha='right', va='center', fontsize=TICK_FS, color=LABEL_COLOR)
+
+    # Артисты статического слоя (для быстрых кадров с blit): всё, что есть на
+    # осях до кривых; свободные подписи добавятся к ним в конце
+    _static_before = [id(a) for a in _axes_artists(ax)] if (sig is not None and not incremental) else None
 
     # ── Вспомогательные функции подписи ──────────
     TEX = bool(MATHTEXT_LABELS)
@@ -4222,7 +4347,7 @@ def _plot_function_impl(fig=None):
             ax.plot([cx, cx], [y_lo_line, y_hi_line],
                     color=color, linewidth=lw, linestyle=ls, zorder=5)
             # Подпись точки пересечения с осью X: (c, 0)
-            if X_TAG and Y_LIM_B <= 0 <= Y_LIM_T:
+            if X_TAG and not fast and Y_LIM_B <= 0 <= Y_LIM_T:
                 if SHOW_VALUES:
                     annotate_point(cx, 0.0, pt_label(coord(cx, cx_exact), '0'),
                                    above=True, color=color)
@@ -4238,7 +4363,8 @@ def _plot_function_impl(fig=None):
         H_sym, h = build_implicit_func(lhs_str, rhs_str)
         # Сетка по видимому окну. Плотность подобрана как компромисс
         # гладкость/скорость; contour сам интерполирует линию уровня 0.
-        N = 600
+        # В быстром кадре сетка грубее (4 мс вместо 13).
+        N = IMPLICIT_FAST_N if fast else 600
         xs = np.linspace(X_LIM_L, X_LIM_R, N)
         ys = np.linspace(Y_LIM_B, Y_LIM_T, N)
         X, Y = np.meshgrid(xs, ys)
@@ -4281,7 +4407,7 @@ def _plot_function_impl(fig=None):
         # ── Пересечения неявной кривой с осями ──────────
         # Ось X: корни H(x, 0)=0 -> точки (x, 0)
         # Ось Y: корни H(0, y)=0 -> точки (0, y)
-        if X_TAG and (Y_LIM_B <= 0 <= Y_LIM_T):
+        if X_TAG and not fast and (Y_LIM_B <= 0 <= Y_LIM_T):
             gx = lambda t: h(t, 0.0)
             Hx0 = H_sym.subs(_Y_SYM, 0)
             cx_list = cands(Hx0, _X_SYM, 'roots', X_LIM_L, X_LIM_R)
@@ -4291,7 +4417,7 @@ def _plot_function_impl(fig=None):
                 if SHOW_VALUES:
                     annotate_point(xr, 0.0, pt_label(coord(xr, xe), '0'),
                                    above=True, color=color)
-        if Y_TAG and (X_LIM_L <= 0 <= X_LIM_R):
+        if Y_TAG and not fast and (X_LIM_L <= 0 <= X_LIM_R):
             gy = lambda t: h(0.0, t)
             H0y = H_sym.subs(_X_SYM, 0)
             cy_list = cands(H0y, _Y_SYM, 'roots', Y_LIM_B, Y_LIM_T)
@@ -4357,11 +4483,13 @@ def _plot_function_impl(fig=None):
                 y_vals = y_vals.copy()
                 y_vals[outside] = np.nan
 
+        # Быстрый кадр: без особых точек (экстремумы, нули, дырки, подписи)
         extrema      = (find_extrema_numerical(f, x_vals, y_vals, Y_LIM_B, Y_LIM_T, disc_pts_x)
-                        if EXTR else [])
+                        if (EXTR and not fast) else [])
         x_intercepts = (find_x_intercepts(f, x_vals, y_vals, disc_pts_x)
-                        if X_TAG else [])
-        y_intercept  = find_y_intercept(f, disc_pts_x, Y_LIM_B, Y_LIM_T) if Y_TAG else None
+                        if (X_TAG and not fast) else [])
+        y_intercept  = (find_y_intercept(f, disc_pts_x, Y_LIM_B, Y_LIM_T)
+                        if (Y_TAG and not fast) else None)
         # y-пересечение (x=0) скрываем, если 0 вне домена функции
         if y_intercept is not None and func_idx < len(FUNC_DOMAINS):
             d_from, d_to = FUNC_DOMAINS[func_idx]
@@ -4393,7 +4521,7 @@ def _plot_function_impl(fig=None):
                            'expr': expr, 'x_sym': x_sym, 'disc': list(disc_pts_x)})
 
         # ── Точки разрыва ───────────────────────
-        if DISC:
+        if DISC and not fast:
             for (dp, ylim) in removable:
                 dp_e, yl_e = removable_exact.get(dp, (None, None))
                 ax.plot(dp, ylim, 'o', color=color, markersize=5,
@@ -4487,7 +4615,7 @@ def _plot_function_impl(fig=None):
     # ══════════════════════════════════════════════
     #  ПЕРЕСЕЧЕНИЯ МЕЖДУ ФУНКЦИЯМИ
     # ══════════════════════════════════════════════
-    if INTER and len(curve_meta) >= 2:
+    if INTER and not fast and len(curve_meta) >= 2:
         def blend(c1, c2):
             c1 = c1.lstrip('#'); c2 = c2.lstrip('#')
             r = (int(c1[0:2],16) + int(c2[0:2],16)) // 2
@@ -4625,8 +4753,9 @@ def _plot_function_impl(fig=None):
     #  ЗАЛИВКИ: область по точке (щелчку)
     # ══════════════════════════════════════════════
     def region_grid():
-        nx = int(min(REGION_MAX_CELLS, max(REGION_MIN_CELLS, round(_ax_w_px))))
-        ny = int(min(REGION_MAX_CELLS, max(REGION_MIN_CELLS, round(_ax_h_px))))
+        cap = REGION_FAST_CELLS if fast else REGION_MAX_CELLS
+        nx = int(min(cap, max(REGION_MIN_CELLS, round(_ax_w_px))))
+        ny = int(min(cap, max(REGION_MIN_CELLS, round(_ax_h_px))))
         return nx, ny, x_span / nx, y_span / ny
 
     def build_region_walls(nx, ny, dx, dy):
@@ -5136,7 +5265,8 @@ def _plot_function_impl(fig=None):
 
     _region_cache = {}
     for fi, entry in enumerate(FILL):
-        LAST_FILL_AREAS[fi] = None
+        if not fast:
+            LAST_FILL_AREAS[fi] = None
         try:
             if isinstance(entry, dict):
                 sx_, sy_ = entry.get('x'), entry.get('y')
@@ -5171,6 +5301,15 @@ def _plot_function_impl(fig=None):
             _LAST_REGION.update(mask=mask, wall=wall, ids=ids, ids2=ids2, nx=nx, ny=ny, dx=dx, dy=dy)
             base_color = region_color(mask, wall, ids, ids2)
             draw_region_hatch(mask, fill_style, lighten_color(base_color), density, nx, ny, dx, dy)
+            if fast:
+                # площадь не считаем; подпись - текст последнего полного кадра на новом месте
+                text = _LAST_AREA_TEXT.get(fi)
+                if show_area and text is not None:
+                    c = _region_center(mask)
+                    if c is not None:
+                        annotate_area(fi, X_LIM_L + (c[1] + 0.5) * dx, Y_LIM_B + (c[0] + 0.5) * dy,
+                                      text, base_color)
+                continue
             area = region_area(mask, wall, ids, ids2, nx, ny, dx, dy)
             exact = None
             if not cut:
@@ -5178,12 +5317,13 @@ def _plot_function_impl(fig=None):
             if exact is not None and not exact_is_readable(exact):
                 exact = None
             LAST_FILL_AREAS[fi] = (area, exact, cut)
+            _LAST_AREA_TEXT[fi] = area_label_text(area, exact)
             if show_area:
                 c = _region_center(mask)
                 if c is not None:
                     xc = X_LIM_L + (c[1] + 0.5) * dx
                     yc = Y_LIM_B + (c[0] + 0.5) * dy
-                    annotate_area(fi, xc, yc, area_label_text(area, exact), base_color)
+                    annotate_area(fi, xc, yc, _LAST_AREA_TEXT[fi], base_color)
         except Exception:
             # Некорректная запись заливки не должна ронять график
             logging.getLogger(__name__).debug("fill entry %r skipped", entry, exc_info=True)
@@ -5196,18 +5336,34 @@ def _plot_function_impl(fig=None):
 
     LAST_CURVES[:] = list(curve_meta)
 
-    _active_free_text_manager = FreeTextManager(fig, ax, font_size=_FS)
+    if not incremental:
+        _dynamic_ids = ({id(a) for a in _axes_artists(ax)} - set(_static_before)
+                        if _static_before is not None else None)
+        _active_free_text_manager = FreeTextManager(fig, ax, font_size=_FS)
 
-    _active_axis_label_manager = AxisLabelManager(
-        fig, ax,
-        artists={'x': _axis_label_x, 'y': _axis_label_y},
-        home_offsets=_axis_home_offsets,
-        default_fontsize=AXIS_FS)
+        _active_axis_label_manager = AxisLabelManager(
+            fig, ax,
+            artists={'x': _axis_label_x, 'y': _axis_label_y},
+            home_offsets=_axis_home_offsets,
+            default_fontsize=AXIS_FS)
+        if sig is not None and _dynamic_ids is not None:
+            # статический слой готов: всё на осях, кроме динамических артистов
+            # этого кадра (кривые, штриховка, асимптоты, подписи площадей)
+            _FAST_STATE.update(
+                valid=True, sig=sig, ax=ax, bg=None, axis_labels=(_axis_label_x, _axis_label_y),
+                static_ids=frozenset(id(a) for a in _axes_artists(ax)) - frozenset(_dynamic_ids))
 
     if standalone:
         plt.show()
 
-    return {'ax': ax, 'errors': errors, 'pending': bool(_DRAW_STATE['pending'])}
+    if fast:
+        # отложенные символьные задания быстрого кадра относятся к мимолётному
+        # значению: не копим их, полный кадр поставит свои
+        with _SYM_LOCK:
+            _PENDING.clear()
+        _DRAW_STATE['pending'] = False
+    return {'ax': ax, 'errors': errors, 'pending': bool(_DRAW_STATE['pending']),
+            'fast_blit': bool(fast and sig is not None and _FAST_STATE.get('valid'))}
 
 
 class _EmptyFunction(Exception):
