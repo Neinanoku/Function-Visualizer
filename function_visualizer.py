@@ -21,6 +21,7 @@ import math
 import re
 import functools
 import threading
+import time
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -496,7 +497,16 @@ def _parse_equation_input(s):
             c = parse_number(right)
             return ('vline', c)
         except Exception:
-            return ('vline', None)
+            pass
+        try:
+            # константа с параметром ('x = a', 'x = 2a + 1'): значение из ползунка
+            ex = parse_exact(right)
+            c = float(ex) if ex is not None else None
+            if c is not None and math.isfinite(c):
+                return ('vline', c)
+        except Exception:
+            pass
+        return ('vline', None)
 
     # Всё остальное с '=' — неявная кривая F(x,y) = G(x,y)
     return ('implicit', (left.strip(), right))
@@ -609,16 +619,33 @@ def take_pending_jobs():
     return jobs
 
 
-def run_jobs(jobs):
+# Пока пользователь тянет ползунок или график, символьные задания между собой
+# ждут (чистый Python в другом потоке отнимает GIL у отрисовки). Приложение
+# ставит флаг на время взаимодействия и снимает после полного кадра.
+JOBS_PAUSE = threading.Event()
+JOBS_PAUSE_MAX_S = 30.0           # предохранитель: застрявший флаг не останавливает расчёт навсегда
+
+
+def run_jobs(jobs, should_abort=None):
     """
     Выполняет задания (key, fn) с семантикой sym_cached. Безопасно вызывать из
     рабочего потока: внутри принудительно включён режим вычисления, поэтому
     вложенные sym_cached() тоже считаются, а не откладываются снова.
+    Между заданиями ждёт, пока снят JOBS_PAUSE (взаимодействие в приложении), и
+    прекращает пачку, если should_abort() вернула True (поток заменён сторожем).
     """
     prev = getattr(_SYM_TLS, 'force_compute', False)
     _SYM_TLS.force_compute = True
     try:
         for key, fn in jobs:
+            if should_abort is not None and should_abort():
+                return
+            waited = 0.0
+            while JOBS_PAUSE.is_set() and waited < JOBS_PAUSE_MAX_S:
+                time.sleep(0.03)
+                waited += 0.03
+                if should_abort is not None and should_abort():
+                    return
             with _SYM_LOCK:
                 if key in _SYM_CACHE:
                     continue
@@ -3324,6 +3351,15 @@ def _axes_artists(ax):
     return [*ax.lines, *ax.texts, *ax.collections, *ax.patches, *ax.images, *ax.artists]
 
 
+def _axes_artists_in_draw_order(ax):
+    """Те же артисты в порядке добавления (как рисует Axes.draw при равном zorder)."""
+    ours = {id(a) for a in _axes_artists(ax)}
+    try:
+        return [a for a in ax.get_children() if id(a) in ours]
+    except Exception:
+        return _axes_artists(ax)
+
+
 def _fast_signature(fig):
     """Подпись статического слоя: всё, от чего зависят сетка, оси, подписи
     делений, названия осей и свободные подписи. None - blit невозможен."""
@@ -3335,14 +3371,10 @@ def _fast_signature(fig):
                 bool(GRID), float(X_GRID), float(Y_GRID), FONT_SIZE, PLOT_THEME,
                 bool(AXES_HIDDEN), bool(X_HIDE), bool(Y_HIDE), bool(MATHTEXT_LABELS),
                 float(fig.get_figwidth()), float(fig.get_figheight()), float(fig.dpi),
-                repr(FREE_TEXTS), repr(AXIS_LABELS), repr(ANNOTATION_OFFSETS.get('free_text_rot')))
+                repr([{k: v for k, v in dict(t).items() if k != 'fontsize'} for t in FREE_TEXTS]),
+                repr(AXIS_LABELS))
     except Exception:
         return None
-
-
-def invalidate_fast_frame():
-    """Сброс кэша быстрых кадров (следующий быстрый кадр построит статический слой заново)."""
-    _FAST_STATE.update(valid=False, sig=None, bg=None)
 
 
 def present_fast(fig):
@@ -3361,19 +3393,31 @@ def present_fast(fig):
         return False
     try:
         static_ids = st['static_ids']
-        dyn = [a for a in _axes_artists(ax) if id(a) not in static_ids]
-        if st.get('bg') is None:
-            was = [a.get_visible() for a in dyn]
-            for a in dyn:
+        ordered = _axes_artists_in_draw_order(ax)
+        dyn = [a for a in ordered if id(a) not in static_ids]
+        # Порядок рисования как у полного кадра: статический артист может лежать в
+        # снимке, только если ни один динамический не рисовался бы раньше него
+        # (zorder ниже или равен самому нижнему динамическому; при равном zorder
+        # статические добавлены раньше). Остальные статические (стрелки осей над
+        # асимптотами, названия осей и свободные подписи над кривыми) рисуются
+        # каждый кадр вместе с динамическими в общем порядке.
+        min_dyn = min((a.get_zorder() for a in dyn), default=float('inf'))
+        top = [a for a in ordered if id(a) in static_ids and a.get_zorder() > min_dyn]
+        if st.get('bg') is None or st.get('bg_min_dyn') != min_dyn:
+            hidden = dyn + top
+            was = [a.get_visible() for a in hidden]
+            for a in hidden:
                 a.set_visible(False)
             try:
                 canvas.draw()
                 st['bg'] = canvas.copy_from_bbox(fig.bbox)
+                st['bg_min_dyn'] = min_dyn
             finally:
-                for a, v in zip(dyn, was):
+                for a, v in zip(hidden, was):
                     a.set_visible(v)
         canvas.restore_region(st['bg'])
-        for a in sorted(dyn, key=lambda a: a.get_zorder()):
+        per_frame = [a for a in ordered if (id(a) not in static_ids) or a.get_zorder() > min_dyn]
+        for a in sorted(per_frame, key=lambda a: a.get_zorder()):     # устойчивая сортировка
             if a.get_visible():
                 ax.draw_artist(a)
         canvas.blit(fig.bbox)
@@ -5264,9 +5308,13 @@ def _plot_function_impl(fig=None, fast=False):
         return LABEL_COLOR
 
     _region_cache = {}
+    if not fast:
+        for k in [k for k in _LAST_AREA_TEXT if k >= len(FILL)]:
+            del _LAST_AREA_TEXT[k]
     for fi, entry in enumerate(FILL):
         if not fast:
             LAST_FILL_AREAS[fi] = None
+            _LAST_AREA_TEXT.pop(fi, None)          # текст подписи относится к прошлой области
         try:
             if isinstance(entry, dict):
                 sx_, sy_ = entry.get('x'), entry.get('y')

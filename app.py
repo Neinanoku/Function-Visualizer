@@ -2882,6 +2882,7 @@ class App(tk.Tk):
             return
         if fast:
             self._interacting = True
+            fv.JOBS_PAUSE.set()                       # символьный поток ждёт между заданиями
             self._fast_wanted = True
             self._cancel_settle()
             self._settle_job = self.after(SETTLE_DELAY_MS, self._settle)
@@ -2930,6 +2931,13 @@ class App(tk.Tk):
         if self._interacting and not self._drawing:
             self._cancel_settle()
             self._fast_wanted = False
+            if self._redraw_job is not None:          # назначенный быстрый кадр больше не нужен
+                try:
+                    self.after_cancel(self._redraw_job)
+                except Exception:
+                    pass
+                self._redraw_job = None
+            self._job_fast = False
             self._redraw()
 
     def redraw_now(self):
@@ -3154,11 +3162,14 @@ class App(tk.Tk):
 
             if result.get('pending'):
                 self._submit_jobs(fv.take_pending_jobs())
-                self._set_status(T("Refining labels (symbolic analysis)…"))
+                if self._pick_row is None:
+                    self._set_status(T("Refining labels (symbolic analysis)…"))
             elif errors or self._incomplete_rows:
                 self._set_status(T("Some functions are incomplete or invalid - hover the red field"),
                                  ERR_COLOR)
-            elif self._pick_row is None:
+            elif self._pick_row is not None:
+                self._set_status(T("Click inside the area on the graph (Esc to cancel)"), BTN_BLUE)
+            else:
                 self._set_status(T("Ready") + self._visible_range_note(result.get('ax')))
         finally:
             self._drawing = False
@@ -3166,6 +3177,7 @@ class App(tk.Tk):
                 # взаимодействие закончено полным кадром (каким бы он ни был):
                 # рабочий поток снова может считать
                 self._interacting = False
+                fv.JOBS_PAUSE.clear()
             if self._redraw_wanted and (self._pan is None or self._fast_wanted):
                 self._redraw_wanted = False
                 if self._fast_wanted:
@@ -3343,7 +3355,8 @@ class App(tk.Tk):
                 self._running_keys.update(keys)
                 self._active_batch = (seq, keys, time.time())
             try:
-                fv.run_jobs(jobs)
+                # поток, заменённый сторожем, бросает пачку на ближайшей границе задания
+                fv.run_jobs(jobs, should_abort=lambda: self._worker is not me)
             except Exception:
                 log_exception("symbolic worker")
             finally:

@@ -1466,6 +1466,25 @@ def test_fast_frame_blit_reuses_static_layer():
     canvas.draw()
     img_full = np.array(canvas.buffer_rgba())
     assert np.array_equal(img_blit, img_full)
+    # порядок слоёв как в полном кадре: асимптота на оси не закрывает стрелку оси,
+    # свободная подпись остаётся над кривой (попиксельно, как обычная отрисовка)
+    fv.FREE_TEXTS.append({'x': 1.0, 'y': 1.0, 'text': 'label', 'fontsize': 9})
+    for funcs in (["a/x", "sin(x)"], ["a*e^x"], ["a*x^2", "x"]):
+        fv.PARAMS = {"a": "1.0"}
+        draw(funcs, fig=fig)
+        canvas.draw()
+        for v in ("1.1", "1.2"):
+            fv.PARAMS = {"a": v}
+            r = fv.plot_function(fig, fast=True)
+            assert r['fast_blit'] and fv.present_fast(fig)
+        img_blit = np.array(canvas.buffer_rgba()).copy()
+        canvas.draw()
+        assert np.array_equal(img_blit, np.array(canvas.buffer_rgba())), funcs
+    fv.FREE_TEXTS.clear()
+    fv.PARAMS = {"a": "1.2"}
+    draw(["a*x^2", "sin(x)"], fig=fig)
+    r = fv.plot_function(fig, fast=True)
+    assert fv.present_fast(fig)
     # смена пределов: новый статический слой
     fv.X_LIM_L, fv.X_LIM_R = -3, 3
     r = fv.plot_function(fig, fast=True)
@@ -1476,3 +1495,36 @@ def test_fast_frame_blit_reuses_static_layer():
     r = fv.plot_function(fig, fast=True)
     assert r['fast_blit'] and fv._FAST_STATE['valid'] and fv._FAST_STATE['bg'] is None
     fv.PARAMS = {}
+
+
+def test_vertical_line_with_parameter_follows_slider():
+    """'x = a' и 'x = 2a+1': вертикаль берёт значение параметра и движется с ползунком."""
+    fv.PARAMS = {"a": "1.5"}
+    try:
+        assert fv._parse_equation_input("x = a") == ('vline', 1.5)
+        assert fv._parse_equation_input("x = 2a + 1") == ('vline', 4.0)
+        res = draw(["x = a"])
+        assert res['errors'] == {} and fv.LAST_CURVES[0]['kind'] == 'vline' and fv.LAST_CURVES[0]['x'] == 1.5
+        fv.PARAMS = {"a": "-2"}
+        res = draw(["x = a"])
+        assert fv.LAST_CURVES[0]['x'] == -2.0
+        assert fv._parse_equation_input("x = b") == ('vline', None)       # неизвестная буква
+    finally:
+        fv.PARAMS = {}
+
+
+def test_run_jobs_pause_and_abort():
+    """run_jobs ждёт между заданиями, пока стоит JOBS_PAUSE, и прекращает пачку по should_abort."""
+    import threading, time as _t
+    done = []
+    jobs = [(('t', 'pause', str(i)), (lambda i=i: done.append(i) or i)) for i in range(3)]
+    fv.JOBS_PAUSE.set()
+    th = threading.Thread(target=fv.run_jobs, args=(jobs,), daemon=True)
+    th.start(); _t.sleep(0.15)
+    assert done == []                                   # пауза держит до первого задания
+    fv.JOBS_PAUSE.clear(); th.join(2.0)
+    assert done == [0, 1, 2]
+    done.clear()
+    jobs = [(('t', 'abort', str(i)), (lambda i=i: done.append(i) or i)) for i in range(3)]
+    fv.run_jobs(jobs, should_abort=lambda: len(done) >= 1)
+    assert done == [0]
